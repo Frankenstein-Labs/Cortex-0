@@ -3,11 +3,16 @@ name: Import full tree
 on:
   push:
     paths:
-      - "bootstrap/part-*.b64"
+      - ".github/workflows/import-full.yml"
   workflow_dispatch:
 
 permissions:
   contents: write
+  workflows: write
+
+env:
+  ARCHIVE_URL: https://work-1-sotdiufphkethnrr.prod-runtime.all-hands.dev/cortex0.tar.gz
+  ARCHIVE_SHA256: c0677ea200d38176cd1d37f715d5a3257c34e351bfef673a6039bcffce05567c
 
 jobs:
   import:
@@ -17,19 +22,18 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Rebuild tree and commit
+      - name: Download and verify archive
         run: |
           set -euo pipefail
-          count=$(ls bootstrap/part-*.b64 2>/dev/null | wc -l)
-          if [ "$count" -ne 4 ]; then
-            echo "waiting for archive parts: $count/4"
-            exit 0
-          fi
-          cat bootstrap/part-*.b64 | base64 -d > /tmp/repo.tar.gz
+          curl -fsSL "$ARCHIVE_URL" -o /tmp/repo.tar.gz
+          echo "$ARCHIVE_SHA256  /tmp/repo.tar.gz" | sha256sum -c -
+
+      - name: Apply tree and push
+        run: |
+          set -euo pipefail
           mkdir -p /tmp/tree
           tar -xzf /tmp/repo.tar.gz -C /tmp/tree
           rsync -a --delete --exclude .git /tmp/tree/ ./
-          rm -rf bootstrap
           git config user.name "CORTEX-0 bot"
           git config user.email "cortex-0@frankenstein-labs.local"
           git add -A
