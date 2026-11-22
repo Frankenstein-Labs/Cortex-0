@@ -84,8 +84,8 @@ réservé aux tests et aux environnements jetables.
 - Aucun token n'est écrit dans le dépôt, les logs ou les commits.
 - `.env`, `*.sqlite`, `*.db` sont ignorés par Git.
 - `publish_hf.py` lit `HF_TOKEN` depuis l'environnement et ne l'affiche jamais.
-- Le token Hugging Face est **absent** de cet environnement : la publication
-  est bloquée, pas simulée.
+- Le token Hugging Face est fourni à l'exécution, utilisé uniquement pour le
+  téléversement, puis jamais écrit dans le dépôt ni dans un fichier de configuration.
 
 ## Non-garanties (important)
 

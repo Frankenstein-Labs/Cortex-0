@@ -13,7 +13,7 @@ testé, et exécuté dans cet environnement.
 ## Phase 2 — Dépôts
 
 - [x] Dépôt de code prêt (GitHub `Frankenstein-Labs/Cortex-0`).
-- [ ] Dépôt Hugging Face créé — **bloqué** : aucun `HF_TOKEN`.
+- [x] Dépôt Hugging Face créé (privé) : `Frankenstein-Labs/Cortex-0-tiny`.
 - [x] Export HF vérifié numériquement (`max_logit_diff = 0.0`).
 
 ## Phase 3 — Architecture du modèle
@@ -90,15 +90,15 @@ testé, et exécuté dans cet environnement.
 - [x] Documentation architecture, training, sécurité, évaluation.
 - [x] Carte de modèle générée.
 - [x] CI GitHub Actions.
-- [ ] Publication Hugging Face — bloquée par le token.
+- [x] Publication Hugging Face (privée) : base + SFT, vérifiée depuis le Hub.
 - [ ] Rapport de recherche externe.
 
 ---
 
 ## Prochaines étapes prioritaires
 
-1. **Token Hugging Face** : débloquer la publication, puis vérifier le
-   téléchargement dans un environnement neuf.
+1. **Publication publique** : décider si `Cortex-0-tiny` doit être rendu
+   public (le dépôt est privé et déjà vérifié).
 2. **GPU** : entraîner `configs/cortex-50m.yaml` sur un GPU gratuit (Colab,
    Kaggle) avec un corpus élargi.
 3. **Données africaines** : constituer un corpus soussou/malinké/bambara
@@ -114,7 +114,7 @@ testé, et exécuté dans cet environnement.
 
 | Blocage | Impact | Contournement |
 | --- | --- | --- |
-| Pas de `HF_TOKEN` | poids non publiés | export local vérifié |
+| Dépôt HF privé | poids non visibles publiquement | publication privée vérifiée |
 | CPU seulement | modèle 2,6 M au lieu de 50–300 M | presets prêts, run GPU à faire |
 | Pas de runtime conteneurisé | sandbox processus | approbations obligatoires |
 | Pas de benchmarks externes | pas de comparaison publique | suite interne seulement |

@@ -5,8 +5,8 @@
 CORTEX-0 est une petite LLM construite **de zéro** : architecture Transformer
 décodeur, tokenizer BPE, pipeline de préentraînement, évaluation, raisonnement
 vérifié, mémoire persistante, moteur d'initiative et agent de codage. Le code
-est réel, testé et exécutable sur CPU. Les poids sont exportables au format
-Hugging Face `LlamaForCausalLM`.
+est réel, testé et exécutable sur CPU. Les poids sont exportés au format
+Hugging Face `LlamaForCausalLM` et publiés dans un dépôt de modèle privé.
 
 > CORTEX-0 est un projet de recherche précoce, pas un assistant généraliste.
 > Le modèle entraîné dans ce dépôt fait ~2,56 M de paramètres, sur un corpus de
@@ -30,7 +30,7 @@ Hugging Face `LlamaForCausalLM`.
 | Initiative proactive | ✅ policy, scheduler, déduplication |
 | Agent de codage | ✅ sandbox, approbations, missions persistantes |
 | API FastAPI | ✅ chat, streaming SSE, mémoire, missions |
-| Publication Hugging Face | ⛔ bloquée : aucun token `HF_TOKEN` disponible |
+| Publication Hugging Face | ✅ privée : `Frankenstein-Labs/Cortex-0-tiny` (base + SFT) |
 
 ---
 
@@ -257,8 +257,16 @@ python scripts/export_hf.py --model-dir checkpoints/tiny-cpu \
 La vérification charge le modèle avec `transformers.LlamaForCausalLM` et
 compare les logits : écart maximal mesuré **0.0**, tokenizer identique.
 
-La publication est prête mais **bloquée** : aucun `HF_TOKEN` n'est disponible
-dans cet environnement. Voir [`docs/HF_PUBLISHING.md`](docs/HF_PUBLISHING.md).
+Les poids sont publiés dans le dépôt **privé**
+[`Frankenstein-Labs/Cortex-0-tiny`](https://huggingface.co/Frankenstein-Labs/Cortex-0-tiny) :
+
+- racine : checkpoint de préentraînement (3 000 steps, meilleure val loss 3,63438) ;
+- `sft/` : checkpoint SFT (200 steps, loss finale 0,02384, val loss 0,11587).
+
+Le dépôt est privé : l'accès à `from_pretrained` nécessite un token HF autorisé.
+Vérification effectuée depuis le Hub : 39 tenseurs, `max_logit_diff = 0.0`,
+`tokenizer_match = true`, et le template de chat CORTEX produit bien la réponse
+« Je suis CORTEX-0… ». Voir [`docs/HF_PUBLISHING.md`](docs/HF_PUBLISHING.md).
 
 ---
 
