@@ -44,6 +44,15 @@ def main() -> None:
     tokenizer = CortexTokenizer.from_pretrained(ROOT / experiment.tokenizer_dir)
     model_config = experiment.model
     if model_config.vocab_size != tokenizer.vocab_size:
+        # A preset may declare a larger vocabulary than the tokenizer actually
+        # provides; the embedding must match the tokenizer, so say so loudly.
+        print(
+            f"[train] WARNING: config vocab_size={model_config.vocab_size} "
+            f"does not match tokenizer vocab_size={tokenizer.vocab_size}; "
+            f"using {tokenizer.vocab_size}. Parameter count will differ from the preset.",
+            file=sys.stderr,
+            flush=True,
+        )
         model_config = replace(model_config, vocab_size=tokenizer.vocab_size)
 
     train_dataset, val_dataset = load_dataset_pair(
