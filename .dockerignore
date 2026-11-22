@@ -1,0 +1,15 @@
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+checkpoints
+datasets/raw
+datasets/processed/*.bin
+experiments/**/*.pt
+experiments/**/*.safetensors
+export
+.env
+*.log
