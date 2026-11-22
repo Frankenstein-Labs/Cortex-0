@@ -1,0 +1,25 @@
+{
+  "checkpoint": "checkpoints/cortex-0-nano/best.safetensors",
+  "parameters": 3147456,
+  "model_config": {
+    "vocab_size": 8192,
+    "d_model": 192,
+    "n_layers": 4,
+    "n_heads": 6,
+    "n_kv_heads": 2,
+    "ffn_mult": 2.6875,
+    "max_seq_len": 512,
+    "rope_theta": 10000.0,
+    "norm_eps": 1e-05,
+    "tie_embeddings": true,
+    "dropout": 0.0,
+    "init_std": 0.02,
+    "bias": false
+  },
+  "training": {
+    "step": 500,
+    "tokens_seen": 8192000,
+    "val": {"loss": 2.538855, "perplexity": 12.6652, "bits_per_token": 3.662794, "token_accuracy": 0.45319, "batches": 30}
+  },
+  "val": {"loss": 2.543533, "perplexity": 12.7246, "bits_per_token": 3.669543, "token_accuracy": 0.452124, "batches": 40}
+}

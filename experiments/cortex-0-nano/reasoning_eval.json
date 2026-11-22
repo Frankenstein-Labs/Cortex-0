@@ -1,0 +1,13 @@
+{
+  "n_problems": 10,
+  "n_samples": 2,
+  "strategies": {
+    "direct": {"correct": 0, "accuracy": 0.0},
+    "cot": {"correct": 0, "accuracy": 0.0},
+    "self_consistency": {"correct": 0, "accuracy": 0.0},
+    "verified": {"correct": 0, "accuracy": 0.0}
+  },
+  "checkpoint": "checkpoints/cortex-0-nano/best.safetensors",
+  "parameters": 3147456,
+  "note": "Arithmetic problems are generated procedurally; ground truth is computed. Full per-problem details are in docs/RESULTS.md; all predicted answers were null or wrong."
+}

@@ -1,0 +1,26 @@
+{"elapsed_sec": 3.62, "lr": 2e-05, "step": 1, "tokens_per_sec": null, "tokens_seen": 16384, "train_loss": 8.991054, "train_token_accuracy": 0.016235}
+{"elapsed_sec": 83.03, "lr": 0.0005, "step": 25, "tokens_per_sec": 5158.36, "tokens_seen": 409600, "train_loss": 8.169798, "train_token_accuracy": 0.068858}
+{"elapsed_sec": 166.07, "lr": 0.001, "step": 50, "tokens_per_sec": 4932.47, "tokens_seen": 819200, "train_loss": 6.062124, "train_token_accuracy": 0.162441}
+{"elapsed_sec": 256.73, "lr": 0.0015, "step": 75, "tokens_per_sec": 4518.17, "tokens_seen": 1228800, "train_loss": 4.680165, "train_token_accuracy": 0.237451}
+{"elapsed_sec": 339.9, "lr": 0.002, "step": 100, "tokens_per_sec": 4924.98, "tokens_seen": 1638400, "train_loss": 4.01014, "train_token_accuracy": 0.28863}
+{"elapsed_sec": 358.76, "step": 100, "val": {"batches": 30, "bits_per_token": 5.491027, "loss": 3.80609, "perplexity": 44.9742, "token_accuracy": 0.309009}}
+{"elapsed_sec": 441.96, "lr": 0.00199789, "step": 125, "tokens_per_sec": 4013.23, "tokens_seen": 2048000, "train_loss": 3.662119, "train_token_accuracy": 0.322009}
+{"elapsed_sec": 524.46, "lr": 0.0019912, "step": 150, "tokens_per_sec": 4964.51, "tokens_seen": 2457600, "train_loss": 3.406842, "train_token_accuracy": 0.353552}
+{"elapsed_sec": 606.51, "lr": 0.00197997, "step": 175, "tokens_per_sec": 4992.09, "tokens_seen": 2867200, "train_loss": 3.240164, "train_token_accuracy": 0.372356}
+{"elapsed_sec": 688.87, "lr": 0.00196426, "step": 200, "tokens_per_sec": 4973.24, "tokens_seen": 3276800, "train_loss": 3.136498, "train_token_accuracy": 0.383821}
+{"elapsed_sec": 707.3, "step": 200, "val": {"batches": 30, "bits_per_token": 4.453887, "loss": 3.087199, "perplexity": 21.9156, "token_accuracy": 0.388961}}
+{"elapsed_sec": 789.66, "lr": 0.00194415, "step": 225, "tokens_per_sec": 4063.92, "tokens_seen": 3686400, "train_loss": 3.040908, "train_token_accuracy": 0.394536}
+{"elapsed_sec": 873.16, "lr": 0.00191973, "step": 250, "tokens_per_sec": 4905.83, "tokens_seen": 4096000, "train_loss": 2.951983, "train_token_accuracy": 0.402803}
+{"elapsed_sec": 962.46, "lr": 0.00189114, "step": 275, "tokens_per_sec": 4586.48, "tokens_seen": 4505600, "train_loss": 2.8802, "train_token_accuracy": 0.413694}
+{"elapsed_sec": 1046.15, "lr": 0.00185851, "step": 300, "tokens_per_sec": 4894.21, "tokens_seen": 4915200, "train_loss": 2.847228, "train_token_accuracy": 0.417566}
+{"elapsed_sec": 1064.35, "step": 300, "val": {"batches": 30, "bits_per_token": 4.055043, "loss": 2.810741, "perplexity": 16.6222, "token_accuracy": 0.421537}}
+{"elapsed_sec": 1156.61, "lr": 0.00182202, "step": 325, "tokens_per_sec": 3708.13, "tokens_seen": 5324800, "train_loss": 2.785142, "train_token_accuracy": 0.423943}
+{"elapsed_sec": 1237.9, "lr": 0.00178186, "step": 350, "tokens_per_sec": 5039.03, "tokens_seen": 5734400, "train_loss": 2.725941, "train_token_accuracy": 0.431099}
+{"elapsed_sec": 1319.12, "lr": 0.00173821, "step": 375, "tokens_per_sec": 5042.78, "tokens_seen": 6144000, "train_loss": 2.683769, "train_token_accuracy": 0.43687}
+{"elapsed_sec": 1400.59, "lr": 0.00169131, "step": 400, "tokens_per_sec": 5027.88, "tokens_seen": 6553600, "train_loss": 2.654799, "train_token_accuracy": 0.439722}
+{"elapsed_sec": 1418.84, "step": 400, "val": {"batches": 30, "bits_per_token": 3.829384, "loss": 2.654327, "perplexity": 14.2154, "token_accuracy": 0.44058}}
+{"elapsed_sec": 1500.57, "lr": 0.00164141, "step": 425, "tokens_per_sec": 4096.77, "tokens_seen": 6963200, "train_loss": 2.61846, "train_token_accuracy": 0.44541}
+{"elapsed_sec": 1581.46, "lr": 0.00158874, "step": 450, "tokens_per_sec": 5063.44, "tokens_seen": 7372800, "train_loss": 2.592282, "train_token_accuracy": 0.447424}
+{"elapsed_sec": 1662.43, "lr": 0.00153358, "step": 475, "tokens_per_sec": 5058.95, "tokens_seen": 7782400, "train_loss": 2.574379, "train_token_accuracy": 0.449216}
+{"elapsed_sec": 1743.47, "lr": 0.00147621, "step": 500, "tokens_per_sec": 5054.33, "tokens_seen": 8192000, "train_loss": 2.530625, "train_token_accuracy": 0.45447}
+{"elapsed_sec": 1761.6, "step": 500, "val": {"batches": 30, "bits_per_token": 3.662794, "loss": 2.538855, "perplexity": 12.6652, "token_accuracy": 0.45319}}

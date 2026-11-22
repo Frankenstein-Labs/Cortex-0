@@ -1,0 +1,17 @@
+{
+  "passed": 10,
+  "total": 10,
+  "duration_sec": 1.66,
+  "checks": [
+    {"name": "model_shapes", "tag": "mechanism", "ok": true, "detail": "logits (2, 16, 128)"},
+    {"name": "causality", "tag": "mechanism", "ok": true, "detail": "future token does not affect past logits (max diff 0.00e+00)"},
+    {"name": "kv_cache", "tag": "mechanism", "ok": true, "detail": "incremental == full forward (max diff 3.58e-07)"},
+    {"name": "sampler", "tag": "mechanism", "ok": true, "detail": "greedy, top-k support and seeded reproducibility"},
+    {"name": "training_decreases_loss", "tag": "mechanism", "ok": true, "detail": "loss 4.207 -> 0.184 in 40 steps"},
+    {"name": "memory", "tag": "mechanism", "ok": true, "detail": "retrieval, semantic facts and preferences"},
+    {"name": "task_resume", "tag": "mechanism", "ok": true, "detail": "progress survives a new process; instruction appended"},
+    {"name": "initiative_gating", "tag": "mechanism", "ok": true, "detail": "disabled, quiet-hours and cooldown gates enforced"},
+    {"name": "sandbox", "tag": "mechanism", "ok": true, "detail": "path escape and non-allowlisted executable refused"},
+    {"name": "reasoning_verifier", "tag": "mechanism", "ok": true, "detail": "correct equation accepted, wrong equation rejected"}
+  ]
+}
