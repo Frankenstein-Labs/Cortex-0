@@ -1,9 +1,29 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-.pytest_cache/
 .venv/
-checkpoints/
-experiments/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Model artifacts are versioned on Hugging Face, not in git.
+checkpoints/*
+!checkpoints/.gitkeep
+datasets/raw/
+datasets/processed/*
+!datasets/processed/manifest.json
+experiments/runs/
+*.bin
 *.pt
 *.safetensors
+*.log
+
+.env
+*.sqlite
+*.db
+
+# Internal agent memory and exported weights
+.openhands/
+export/

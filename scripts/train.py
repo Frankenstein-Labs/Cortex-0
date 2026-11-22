@@ -1,48 +1,83 @@
-"""Train CORTEX-0 on a local UTF-8 text file."""
+#!/usr/bin/env python3
+"""Train CORTEX-0 from a YAML experiment configuration."""
+
+from __future__ import annotations
+
 import argparse
 import json
+import sys
+from dataclasses import replace
 from pathlib import Path
 
-import torch
-from torch.utils.data import DataLoader
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
-from cortex.model import CortexConfig, CortexLM
-from cortex.training.data import CausalTextDataset
+from cortex.config import ExperimentConfig, get_preset  # noqa: E402
+from cortex.model import CortexForCausalLM  # noqa: E402
+from cortex.tokenizer import CortexTokenizer  # noqa: E402
+from cortex.training.trainer import Trainer, load_dataset_pair, set_seed  # noqa: E402
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("corpus", type=Path)
-    parser.add_argument("--config", type=Path, default=Path("configs/tiny.json"))
-    parser.add_argument("--steps", type=int, default=100)
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--output", type=Path, default=Path("checkpoints/cortex-0-tiny.pt"))
+    parser.add_argument("--config", default="configs/tiny-cpu.yaml")
+    parser.add_argument("--preset", choices=["tiny-cpu", "cortex-50m", "cortex-150m"])
+    parser.add_argument("--max-steps", type=int)
+    parser.add_argument("--device")
+    parser.add_argument("--out-dir")
+    parser.add_argument("--no-resume", action="store_true")
     args = parser.parse_args()
 
-    config = CortexConfig(**json.loads(args.config.read_text()))
-    dataset = CausalTextDataset(args.corpus, config.context_size)
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
-    model = CortexLM(config)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    model.train()
-    step = 0
-    while step < args.steps:
-        for input_ids, labels in loader:
-            optimizer.zero_grad(set_to_none=True)
-            _, loss = model(input_ids, labels)
-            assert loss is not None
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            step += 1
-            if step == 1 or step % 10 == 0:
-                print(f"step={step} loss={loss.item():.4f}")
-            if step >= args.steps:
-                break
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"config": config.__dict__, "model": model.state_dict()}, args.output)
-    print(f"saved={args.output}")
+    experiment = ExperimentConfig.load(ROOT / args.config)
+    if args.preset:
+        experiment.model = get_preset(args.preset)
+    training = experiment.training
+    if args.max_steps:
+        training = replace(training, max_steps=args.max_steps)
+    if args.device:
+        training = replace(training, device=args.device)
+    if args.out_dir:
+        training = replace(training, out_dir=args.out_dir)
+    if args.no_resume:
+        training = replace(training, resume=False)
+
+    tokenizer = CortexTokenizer.from_pretrained(ROOT / experiment.tokenizer_dir)
+    model_config = experiment.model
+    if model_config.vocab_size != tokenizer.vocab_size:
+        model_config = replace(model_config, vocab_size=tokenizer.vocab_size)
+
+    train_dataset, val_dataset = load_dataset_pair(
+        ROOT / experiment.train_data,
+        ROOT / experiment.val_data,
+        block_size=model_config.max_position_embeddings,
+    )
+    model = CortexForCausalLM(model_config)
+    set_seed(training.seed)
+    trainer = Trainer(
+        model=model,
+        tokenizer=tokenizer,
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+        config=training,
+        out_dir=ROOT / training.out_dir,
+    )
+    print(
+        json.dumps(
+            {
+                "parameters": model.num_parameters(),
+                "parameters_non_embedding": model.num_parameters(non_embedding=True),
+                "train_tokens": int(len(train_dataset.data)),
+                "val_tokens": int(len(val_dataset.data)) if val_dataset else 0,
+                "block_size": model_config.max_position_embeddings,
+                "device": str(trainer.device),
+                "dtype": str(trainer.dtype),
+            },
+            indent=2,
+        ),
+        flush=True,
+    )
+    result = trainer.train()
+    print(json.dumps({"result": result}, indent=2), flush=True)
 
 
 if __name__ == "__main__":
