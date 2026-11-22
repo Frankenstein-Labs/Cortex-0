@@ -43,7 +43,7 @@ pip install -e ".[dev,train]"
 # 1. Construire le tokenizer et les fichiers de tokens
 python scripts/prepare_data.py --config configs/tiny-cpu.yaml
 
-# 2. Préentraîner (CPU, ~36 min pour 3 000 steps)
+# 2. Préentraîner (CPU, ~15 min pour 3 000 steps)
 python scripts/train.py --config configs/tiny-cpu.yaml
 
 # 3. Évaluer

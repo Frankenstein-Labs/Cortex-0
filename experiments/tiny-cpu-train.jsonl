@@ -1,4 +1,13 @@
-{"meta": {"parameters": 2557632, "parameters_non_embedding": 1771200, "train_tokens": 5923113, "val_tokens": 132854, "block_size": 256, "device": "cpu", "dtype": "torch.float32"}}
+nohup: ignoring input
+{
+  "parameters": 2557632,
+  "parameters_non_embedding": 1771200,
+  "train_tokens": 5923113,
+  "val_tokens": 132854,
+  "block_size": 256,
+  "device": "cpu",
+  "dtype": "torch.float32"
+}
 {"step": 1, "loss": 8.3437, "lr": 4e-06, "grad_norm": 1.3879, "tokens_per_second": 4603.1}
 {"step": 50, "loss": 7.54319, "lr": 0.0002, "grad_norm": 0.9101, "tokens_per_second": 6019.8}
 {"step": 100, "loss": 6.75742, "lr": 0.0004, "grad_norm": 0.572, "tokens_per_second": 6018.2}
@@ -70,4 +79,12 @@
 {"step": 2950, "loss": 3.52571, "lr": 6.043e-05, "grad_norm": 1.3223, "tokens_per_second": 5699.9}
 {"step": 3000, "loss": 3.68272, "lr": 6e-05, "grad_norm": 1.5078, "tokens_per_second": 5704.6}
 {"step": 3000, "val_loss": 3.63438, "val_perplexity": 37.878}
-{"result": {"steps": 3000, "final_loss": 3.6827173233032227, "best_val_loss": 3.63438, "tokens_seen": 12288000, "elapsed_seconds": 2162.0}}
+{
+  "result": {
+    "steps": 3000,
+    "final_loss": 3.6827173233032227,
+    "best_val_loss": 3.63438,
+    "tokens_seen": 12288000,
+    "elapsed_seconds": 2162.0
+  }
+}
