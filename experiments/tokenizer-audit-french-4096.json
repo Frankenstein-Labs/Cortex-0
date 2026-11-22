@@ -1,0 +1,104 @@
+{
+  "tokenizer_dir": "datasets/french/tokenizer",
+  "vocab_size": 4096,
+  "per_category": {
+    "A_fondamental": {
+      "documents": 40,
+      "chars": 99855,
+      "tokens": 33626,
+      "chars_per_token": 2.97,
+      "words": 15298,
+      "tokens_per_word": 2.198,
+      "split_word_rate": 0.6158,
+      "accented_words": 2523,
+      "accented_split_rate": 0.8133,
+      "rare_words": 3320,
+      "rare_split_rate": 0.9822,
+      "unique_words": 4890
+    },
+    "B_conversationnel": {
+      "documents": 40,
+      "chars": 145043,
+      "tokens": 46463,
+      "chars_per_token": 3.122,
+      "words": 22318,
+      "tokens_per_word": 2.082,
+      "split_word_rate": 0.6125,
+      "accented_words": 3473,
+      "accented_split_rate": 0.8232,
+      "rare_words": 4078,
+      "rare_split_rate": 0.9811,
+      "unique_words": 6347
+    },
+    "C_professionnel": {
+      "documents": 40,
+      "chars": 158472,
+      "tokens": 49975,
+      "chars_per_token": 3.171,
+      "words": 23729,
+      "tokens_per_word": 2.106,
+      "split_word_rate": 0.6096,
+      "accented_words": 4071,
+      "accented_split_rate": 0.8394,
+      "rare_words": 4296,
+      "rare_split_rate": 0.9823,
+      "unique_words": 6662
+    },
+    "D_scientifique": {
+      "documents": 40,
+      "chars": 158961,
+      "tokens": 49144,
+      "chars_per_token": 3.235,
+      "words": 23771,
+      "tokens_per_word": 2.067,
+      "split_word_rate": 0.6067,
+      "accented_words": 4472,
+      "accented_split_rate": 0.8547,
+      "rare_words": 3710,
+      "rare_split_rate": 0.9798,
+      "unique_words": 6012
+    },
+    "E_technique": {
+      "documents": 9,
+      "chars": 33340,
+      "tokens": 11875,
+      "chars_per_token": 2.808,
+      "words": 4996,
+      "tokens_per_word": 2.377,
+      "split_word_rate": 0.6409,
+      "accented_words": 696,
+      "accented_split_rate": 0.8391,
+      "rare_words": 1238,
+      "rare_split_rate": 0.9515,
+      "unique_words": 1839
+    }
+  },
+  "overall_french": {
+    "documents": 169,
+    "chars": 595671,
+    "tokens": 191083,
+    "chars_per_token": 3.117,
+    "words": 90112,
+    "tokens_per_word": 2.121,
+    "split_word_rate": 0.6124,
+    "accented_words": 15235,
+    "accented_split_rate": 0.8358,
+    "rare_words": 10168,
+    "rare_split_rate": 0.9915,
+    "unique_words": 17363
+  },
+  "code_python": {
+    "files": 53,
+    "chars": 257232,
+    "tokens": 162540,
+    "chars_per_token": 1.583
+  },
+  "single_char_tokens": {
+    "covered": 44,
+    "total": 46,
+    "missing": [
+      "ë",
+      "æ"
+    ]
+  }
+}
