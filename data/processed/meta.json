@@ -1,0 +1,17 @@
+{
+  "source": "roneneldan/TinyStories (Hugging Face)",
+  "license": "CDLA-Sharing-1.0",
+  "train_parquet": "data/raw/tinystories_train.parquet",
+  "val_parquet": "data/raw/tinystories_valid.parquet",
+  "train_stories": 120000,
+  "val_stories": 3000,
+  "train_chars": 108003433,
+  "val_chars": 2622556,
+  "train_tokens": 26681760,
+  "val_tokens": 644887,
+  "chars_per_token": 4.0483,
+  "vocab_size": 8192,
+  "dtype": "uint16",
+  "seed": 1337,
+  "prepared_seconds": 19.0
+}

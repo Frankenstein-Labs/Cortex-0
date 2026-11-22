@@ -1,9 +1,30 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-.pytest_cache/
+.eggs/
+build/
+dist/
 .venv/
+venv/
+.env
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Generated data and weights are reproducible, not source
+data/raw/
+data/processed/*.bin
 checkpoints/
-experiments/
-*.pt
-*.safetensors
+artifacts/*.db
+artifacts/*.db-*
+artifacts/tasks/
+artifacts/coding_report.json
+runs/
+wandb/
+*.log
+
+# Agent workspace memory
+.openhands/
+data/processed/tokenizer.json
+data/processed/tokenizer.meta.json
