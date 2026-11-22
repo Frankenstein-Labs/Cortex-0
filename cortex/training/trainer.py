@@ -144,6 +144,12 @@ class Trainer:
         self.model.to(self.device)
         self.state = TrainState()
         self.optimizer = self._build_optimizer()
+        # fp16 on GPU needs loss scaling or gradients underflow; bf16 does not.
+        self._scaler = (
+            torch.amp.GradScaler("cuda")
+            if self.device.type == "cuda" and self.dtype == torch.float16
+            else None
+        )
         self._log_path = self.out_dir / "logs" / "train.jsonl"
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         self._writer = None
@@ -195,7 +201,7 @@ class Trainer:
     def train(self) -> Dict[str, float]:
         cfg = self.config
         set_seed(cfg.seed)
-        if cfg.resume and (self.out_dir / "trainer_state.json").exists():
+        if cfg.resume:
             self._resume()
 
         data_iter = self._infinite_loader()
@@ -204,6 +210,9 @@ class Trainer:
         started = time.time()
         tokens_per_step = cfg.batch_size * self.train_dataset.block_size * cfg.grad_accum_steps
         last_loss = float("nan")
+
+        # Count only this run's tokens so that resuming does not inflate the rate.
+        tokens_this_run = 0
 
         for step in range(self.state.step, cfg.max_steps):
             lr = cosine_lr(step, cfg.max_steps, cfg.warmup_steps, cfg.learning_rate, cfg.min_lr_ratio)
@@ -217,13 +226,24 @@ class Trainer:
                 with self._autocast():
                     outputs = self.model(**batch)
                     loss = outputs["loss"]
-                (loss / cfg.grad_accum_steps).backward()
+                scaled = loss / cfg.grad_accum_steps
+                if self._scaler is not None:
+                    self._scaler.scale(scaled).backward()
+                else:
+                    scaled.backward()
                 loss_value += float(loss.detach()) / cfg.grad_accum_steps
 
+            if self._scaler is not None:
+                self._scaler.unscale_(optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.grad_clip)
-            optimizer.step()
+            if self._scaler is not None:
+                self._scaler.step(optimizer)
+                self._scaler.update()
+            else:
+                optimizer.step()
             self.state.step = step + 1
             self.state.tokens_seen += tokens_per_step
+            tokens_this_run += tokens_per_step
             last_loss = loss_value
 
             if (step + 1) % cfg.log_interval == 0 or step == 0:
@@ -233,7 +253,7 @@ class Trainer:
                     "loss": round(loss_value, 5),
                     "lr": round(lr, 8),
                     "grad_norm": round(float(grad_norm), 4),
-                    "tokens_per_second": round(self.state.tokens_seen / elapsed, 1),
+                    "tokens_per_second": round(tokens_this_run / elapsed, 1),
                 }
                 self._log(record)
 
@@ -291,6 +311,16 @@ class Trainer:
         directory.mkdir(parents=True, exist_ok=True)
         save_pretrained(self.model, self.tokenizer, self.model.config, directory)
         torch.save(self.optimizer.state_dict(), directory / "optimizer.pt")
+        torch.save(
+            {
+                "python": random.getstate(),
+                "numpy": np.random.get_state(),
+                "torch": torch.get_rng_state(),
+                "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                "scaler": self._scaler.state_dict() if self._scaler else None,
+            },
+            directory / "rng_state.pt",
+        )
         (directory / "trainer_state.json").write_text(
             json.dumps(self.state.to_dict(), indent=2) + "\n", encoding="utf-8"
         )
@@ -301,6 +331,13 @@ class Trainer:
         weights = self.out_dir / "model.safetensors"
         if not weights.exists():
             return
+        # Weights without state would silently restart from step 0, losing the
+        # run; fail loudly instead.
+        if not state_path.exists():
+            raise RuntimeError(
+                f"checkpoint at {self.out_dir} has weights but no trainer_state.json; "
+                "refusing to restart silently would lose progress"
+            )
         self.state = TrainState(**json.loads(state_path.read_text(encoding="utf-8")))
         loaded = load_file(str(weights))
         missing, unexpected = self.model.load_state_dict(loaded, strict=False)
@@ -309,6 +346,16 @@ class Trainer:
         optimizer_path = self.out_dir / "optimizer.pt"
         if optimizer_path.exists():
             self.optimizer.load_state_dict(torch.load(optimizer_path, map_location=self.device))
+        rng_path = self.out_dir / "rng_state.pt"
+        if rng_path.exists():
+            rng = torch.load(rng_path, map_location="cpu", weights_only=False)
+            random.setstate(rng["python"])
+            np.random.set_state(rng["numpy"])
+            torch.set_rng_state(rng["torch"])
+            if rng.get("cuda") is not None and torch.cuda.is_available():
+                torch.cuda.set_rng_state_all(rng["cuda"])
+            if self._scaler is not None and rng.get("scaler") is not None:
+                self._scaler.load_state_dict(rng["scaler"])
         self._log({"resumed_from_step": self.state.step, "missing": list(missing)})
 
     def _log(self, record: Dict[str, float]) -> None:
