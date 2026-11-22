@@ -1,48 +1,90 @@
-"""Train CORTEX-0 on a local UTF-8 text file."""
+#!/usr/bin/env python3
+"""Train CORTEX-0 from a prepared token corpus.
+
+Example (CPU, ~10M parameters):
+  python scripts/train.py --config configs/cortex-0-mini.json \
+      --data data/processed --run-name cortex-0-mini
+"""
+
+from __future__ import annotations
+
 import argparse
 import json
+import sys
 from pathlib import Path
 
-import torch
-from torch.utils.data import DataLoader
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from cortex.model import CortexConfig, CortexLM
-from cortex.training.data import CausalTextDataset
+from cortex.config import ExperimentConfig
+from cortex.model.lm import CortexLM
+from cortex.training.data import TokenDataMeta, TokenDataset
+from cortex.training.trainer import Trainer
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("corpus", type=Path)
-    parser.add_argument("--config", type=Path, default=Path("configs/tiny.json"))
-    parser.add_argument("--steps", type=int, default=100)
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--output", type=Path, default=Path("checkpoints/cortex-0-tiny.pt"))
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", required=True)
+    ap.add_argument("--data", default="data/processed")
+    ap.add_argument("--run-name", default=None)
+    ap.add_argument("--checkpoint-dir", default="checkpoints")
+    ap.add_argument("--resume", default=None, help="path to a *.train.pt state file")
+    ap.add_argument("--steps", type=int, default=None, help="override max_steps")
+    ap.add_argument("--device", default=None, help="override device (cpu/cuda/mps/auto)")
+    args = ap.parse_args()
 
-    config = CortexConfig(**json.loads(args.config.read_text()))
-    dataset = CausalTextDataset(args.corpus, config.context_size)
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
-    model = CortexLM(config)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    model.train()
-    step = 0
-    while step < args.steps:
-        for input_ids, labels in loader:
-            optimizer.zero_grad(set_to_none=True)
-            _, loss = model(input_ids, labels)
-            assert loss is not None
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            step += 1
-            if step == 1 or step % 10 == 0:
-                print(f"step={step} loss={loss.item():.4f}")
-            if step >= args.steps:
-                break
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"config": config.__dict__, "model": model.state_dict()}, args.output)
-    print(f"saved={args.output}")
+    exp = ExperimentConfig.load(args.config)
+    if args.run_name:
+        exp.train.run_name = args.run_name
+    if args.steps:
+        exp.train.max_steps = args.steps
+    if args.device:
+        exp.train.device = args.device
+
+    data_dir = Path(args.data)
+    meta = TokenDataMeta.load(data_dir / "meta.json")
+    if exp.model.vocab_size != meta.vocab_size:
+        print(
+            f"[warn] config vocab_size={exp.model.vocab_size} != tokenizer vocab={meta.vocab_size}; "
+            "using tokenizer size",
+            file=sys.stderr,
+        )
+        exp.model.vocab_size = meta.vocab_size
+
+    train_ds = TokenDataset(data_dir / "train.bin", exp.train.seq_len, meta.vocab_size, meta.dtype)
+    val_ds = TokenDataset(data_dir / "val.bin", exp.train.seq_len, meta.vocab_size, meta.dtype)
+
+    model = CortexLM(exp.model)
+    print(
+        json.dumps(
+            {
+                "run_name": exp.train.run_name,
+                "parameters": model.num_parameters(),
+                "non_embedding_parameters": model.num_parameters(non_embedding=True),
+                "train_tokens": meta.train_tokens,
+                "val_tokens": meta.val_tokens,
+                "seq_len": exp.train.seq_len,
+                "batch_size": exp.train.batch_size,
+                "max_steps": exp.train.max_steps,
+                "tokens_per_step": exp.train.batch_size * exp.train.grad_accum * exp.train.seq_len,
+            },
+            indent=2,
+        ),
+        flush=True,
+    )
+
+    trainer = Trainer(
+        model,
+        exp.train,
+        train_ds,
+        val_ds,
+        output_dir=args.checkpoint_dir,
+        tokenizer_meta={"path": str(data_dir / "tokenizer.json"), **meta.__dict__},
+    )
+    if args.resume:
+        trainer.resume(args.resume)
+        print(f"resumed from {args.resume} at step {trainer.step}", flush=True)
+    summary = trainer.train()
+    print(json.dumps(summary, indent=2))
 
 
 if __name__ == "__main__":
