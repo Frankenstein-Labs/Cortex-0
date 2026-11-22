@@ -42,7 +42,7 @@ curl localhost:8000/v1/model/info
 ```json
 {
   "loaded": true,
-  "parameters": 2560512,
+  "parameters": 2557632,
   "context_length": 256,
   "vocab_size": 4096,
   "device": "cpu",
@@ -63,7 +63,7 @@ curl -X POST localhost:8000/v1/generate \
   "text": "...",
   "prompt_tokens": 4,
   "generated_tokens": 40,
-  "model": {"loaded": true, "parameters": 2560512, "context_length": 256}
+  "model": {"loaded": true, "parameters": 2557632, "context_length": 256}
 }
 ```
 

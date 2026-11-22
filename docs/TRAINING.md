@@ -8,7 +8,7 @@
 | Python | 3.11 |
 | PyTorch | 2.x, CPU |
 | Device | `cpu` |
-| Durée du run | ~35 min pour 3 000 steps |
+| Durée du run | ~36 min pour 3 000 steps |
 | Débit | ~5 700 tokens/s |
 
 Aucun GPU n'était disponible. Les presets 50M et 150M sont fournis mais non
@@ -67,7 +67,7 @@ Hyperparamètres (`configs/tiny-cpu.yaml`) :
 
 | Paramètre | Valeur |
 | --- | --- |
-| Paramètres | 2 560 512 |
+| Paramètres | 2 557 632 |
 | Couches | 4 |
 | Hidden | 192 |
 | Têtes / têtes KV | 6 / 6 |
@@ -88,7 +88,7 @@ steps ; le meilleur modèle selon la validation est copié dans
 
 ### Courbe mesurée
 
-Extrait de `experiments/tiny-cpu-train.log` :
+Extrait de `experiments/tiny-cpu-train.jsonl` :
 
 | Step | Loss | Grad norm | Tokens/s |
 | --- | --- | --- | --- |
@@ -101,7 +101,8 @@ Extrait de `experiments/tiny-cpu-train.log` :
 | 2 400 | 3.420 | 1.243 | 5 693 |
 | 2 750 | 3.605 | 1.291 | 5 684 |
 
-Validation au step 2 400 : loss 3.690, perplexité 40.05.
+Validation au step 2 400 : loss 3.690, perplexité 40.05. Validation finale au
+step 3 000 : loss 3.63438, perplexité 37.878.
 
 Les valeurs finales exactes sont dans `experiments/eval-tiny-cpu.json`, généré
 par `scripts/evaluate.py` avec le commit Git et l'horodatage.
