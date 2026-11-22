@@ -34,11 +34,11 @@ pas un corpus natif de locuteurs pour les langues africaines.
 1. Normalisation des sauts de ligne, espaces et UTF-8.
 2. Suppression des en-têtes/pieds Gutenberg.
 3. Wikipédia : retrait des sections « Notes et références », « Liens
-externes », « Voir aussi », « Bibliographie », des tableaux et des URL.
+   externes », « Voir aussi », « Bibliographie », des tableaux et des URL.
 4. Filtre qualité : 400 à 12 000 caractères, 95 % de caractères imprimables,
-pas de caractère de remplacement, ratio de mots français ≥ 0,08.
+   pas de caractère de remplacement, ratio de mots français ≥ 0,08.
 5. Déduplication exacte (SHA-256) et normalisée (minuscules, ponctuation et
-espaces retirés).
+   espaces retirés).
 6. Aucun doublon exact ou normalisé conservé.
 
 | Étape | Documents |
@@ -71,13 +71,13 @@ n'entre dans le tokenizer ni dans l'ajustement des hyperparamètres.
 ## Limites honnêtes
 
 - 10,3 M tokens restent peu pour un modèle de 3,3 M paramètres (≈3 tokens par
-paramètre) et très peu pour 15 M.
+  paramètre) et très peu pour 15 M.
 - Les livres Gutenberg sont du français littéraire du XIXe siècle, pas du
-français courant contemporain.
+  français courant contemporain.
 - Wikipédia est encyclopédique et parfois listé ; le nettoyage retire une
-partie des listes mais pas toute la structure.
+  partie des listes mais pas toute la structure.
 - Les langues africaines ne sont représentées que par 15 phrases de
-conversation ; ce n'est pas un corpus linguistique suffisant.
+  conversation ; ce n'est pas un corpus linguistique suffisant.
 - Le corpus ne remplace pas une validation par des locuteurs natifs.
 
 ## Reproduction

@@ -26,16 +26,16 @@ questions sont uniques.
 ## Vérifications
 
 - **Contamination** : 23 questions générées ont été retirées parce qu'elles
-reproduisaient exactement un prompt de `cortex-100-fr`. Aucun prompt du
-benchmark n'est présent dans le SFT final.
+  reproduisaient exactement un prompt de `cortex-100-fr`. Aucun prompt du
+  benchmark n'est présent dans le SFT final.
 - **Déduplication** : 51 doublons de prompt retirés ; 542 prompts uniques.
 - **Code** : les 25 exemples sont exécutés dans un sous-processus isolé
-(`python -I`) avec des assertions ; un exemple qui échoue fait échouer la
-construction du dataset.
+  (`python -I`) avec des assertions ; un exemple qui échoue fait échouer la
+  construction du dataset.
 - **Mathématiques** : les réponses sont calculées par le générateur, pas
-recopiées à la main.
+  recopiées à la main.
 - **Masquage** : seuls les tokens de la réponse et l'EOS sont supervisés ; la
-question et le prompt système sont à `-100`.
+  question et le prompt système sont à `-100`.
 
 ## Découpage
 
@@ -51,11 +51,11 @@ train et la validation.
 ## Limites
 
 - 542 exemples restent petits pour un modèle de 3,3 M paramètres. Le SFT peut
-encore surapprendre ; la validation et l'arrêt précoce sont obligatoires.
+  encore surapprendre ; la validation et l'arrêt précoce sont obligatoires.
 - Les instructions générées couvrent des transformations simples ; elles ne
-remplacent pas un corpus d'instructions humaines.
+  remplacent pas un corpus d'instructions humaines.
 - Le code couvre 25 fonctions courtes ; ce n'est pas un benchmark de
-programmation.
+  programmation.
 - Les langues africaines ne sont pas encore un axe SFT quantitatif.
 
 ## Reproduction
