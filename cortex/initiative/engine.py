@@ -1,297 +1,266 @@
 """Autonomous initiative engine.
 
-The engine proposes messages only when they pass explicit usefulness gates:
-relevance to a project, novelty against past messages, a minimum score, a
-cooldown, a daily cap and quiet hours. It returns ``None`` when nothing is
-worth saying, which is the common case by design.
+It proposes *one* high-value message at a time, only when policy allows it and
+only if the proposal is sufficiently novel.  Every proposal is persisted with
+its score and source so that proactivity is measurable and auditable.
 """
 
 from __future__ import annotations
 
-import math
+import datetime as _dt
+import json
 import time
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Callable, Sequence
+from dataclasses import dataclass
+from typing import Dict, List, Optional
 
-from cortex.memory.store import MemoryStore, tokenize
-
-
-@dataclass
-class InitiativeConfig:
-    enabled: bool = True
-    min_interval_sec: float = 900.0
-    max_per_day: int = 4
-    quiet_hours_start: int = 22
-    quiet_hours_end: int = 8
-    min_score: float = 0.55
-    min_novelty: float = 0.35
-    lookback_messages: int = 30
-
-    def as_dict(self) -> dict:
-        return self.__dict__.copy()
+from ..memory.retrieval import cosine, jaccard
+from ..memory.store import MemoryStore
+from ..planning.goals import GoalStore
+from .curiosity import CuriosityEngine
+from .ideas import IdeaGenerator
+from .policy import InitiativePolicy
+from .self_evaluation import SelfEvaluator
 
 
 @dataclass
-class Candidate:
+class Initiative:
+    id: int
+    session_id: Optional[str]
     kind: str
-    text: str
-    relevance: float = 0.0
-    novelty: float = 0.0
-    specificity: float = 0.0
-
-    @property
-    def score(self) -> float:
-        return round(0.45 * self.relevance + 0.35 * self.novelty + 0.20 * self.specificity, 4)
-
-
-@dataclass
-class InitiativeMessage:
-    kind: str
-    text: str
+    message: str
     score: float
+    status: str
+    meta: dict
     created_at: float
-    session_id: str = "default"
-    delivered: bool = False
+    sent_at: Optional[float]
 
-    def as_dict(self) -> dict:
+    def to_dict(self) -> dict:
         return {
-            "kind": self.kind,
-            "text": self.text,
-            "score": self.score,
-            "created_at": self.created_at,
+            "id": self.id,
             "session_id": self.session_id,
-            "delivered": self.delivered,
+            "kind": self.kind,
+            "message": self.message,
+            "score": round(self.score, 4),
+            "status": self.status,
+            "meta": self.meta,
+            "created_at": self.created_at,
+            "sent_at": self.sent_at,
         }
 
 
-@dataclass
-class Decision:
-    message: InitiativeMessage | None
-    reason: str
-    considered: list[dict] = field(default_factory=list)
-
-    def as_dict(self) -> dict:
-        return {
-            "message": self.message.as_dict() if self.message else None,
-            "reason": self.reason,
-            "considered": self.considered,
-        }
-
-
-class Notifier:
-    def send(self, message: InitiativeMessage) -> bool:  # pragma: no cover - interface
-        raise NotImplementedError
-
-
-class ConsoleNotifier(Notifier):
-    def send(self, message: InitiativeMessage) -> bool:
-        print(f"[CORTEX initiative] {message.text}")
-        return True
-
-
-class RecordingNotifier(Notifier):
-    def __init__(self) -> None:
-        self.messages: list[InitiativeMessage] = []
-
-    def send(self, message: InitiativeMessage) -> bool:
-        self.messages.append(message)
-        return True
-
-
-class WebhookNotifier(Notifier):
-    """Optional push notification. Disabled unless an explicit URL is provided."""
-
-    def __init__(self, url: str, timeout: float = 10.0) -> None:
-        if not url.startswith(("https://", "http://")):
-            raise ValueError("webhook URL must be http(s)")
-        self.url = url
-        self.timeout = timeout
-
-    def send(self, message: InitiativeMessage) -> bool:
-        import json
-        import urllib.request
-
-        payload = json.dumps(message.as_dict()).encode("utf-8")
-        req = urllib.request.Request(self.url, data=payload, headers={"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                return 200 <= resp.status < 300
-        except Exception:
-            return False
+def _row_to_initiative(row) -> Initiative:
+    return Initiative(
+        id=int(row["id"]),
+        session_id=row["session_id"],
+        kind=row["kind"],
+        message=row["message"],
+        score=float(row["score"]),
+        status=row["status"],
+        meta=json.loads(row["meta"] or "{}"),
+        created_at=float(row["created_at"]),
+        sent_at=row["sent_at"],
+    )
 
 
 class InitiativeEngine:
     def __init__(
         self,
-        memory: MemoryStore,
-        tasks=None,
-        config: InitiativeConfig | None = None,
-        notifier: Notifier | None = None,
-        model=None,
-        tokenizer=None,
-        clock: Callable[[], float] = time.time,
+        store: MemoryStore,
+        policy: Optional[InitiativePolicy] = None,
+        seed: int = 0,
     ) -> None:
-        self.memory = memory
-        self.tasks = tasks
-        self.config = config or InitiativeConfig()
-        self.notifier = notifier or ConsoleNotifier()
-        self.model = model
-        self.tokenizer = tokenizer
-        self.clock = clock
+        self.store = store
+        self.policy = policy or InitiativePolicy()
+        self.goals = GoalStore(store)
+        self.curiosity = CuriosityEngine(store)
+        self.ideas = IdeaGenerator(store, seed=seed)
+        self.self_evaluator = SelfEvaluator(store)
 
-    # --------------------------------------------------------------- utilities
-    def _quiet(self, ts: float) -> bool:
-        hour = datetime.fromtimestamp(ts).hour
-        start, end = self.config.quiet_hours_start, self.config.quiet_hours_end
-        if start == end:
-            return False
-        if start < end:
-            return start <= hour < end
-        return hour >= start or hour < end
-
-    def _novelty(self, text: str, history: Sequence[dict]) -> float:
-        terms = set(tokenize(text))
-        if not terms:
-            return 0.0
-        if not history:
-            return 1.0
-        best_overlap = 0.0
-        for item in history:
-            other = set(tokenize(item["content"]))
-            if not other:
-                continue
-            best_overlap = max(best_overlap, len(terms & other) / len(terms | other))
-        return round(1.0 - best_overlap, 4)
-
-    def _relevance(self, text: str, goals: list[str]) -> float:
-        if not goals:
-            return 0.5
-        terms = set(tokenize(text))
-        goal_terms: set[str] = set()
-        for goal in goals:
-            goal_terms |= set(tokenize(goal))
-        if not terms or not goal_terms:
-            return 0.0
-        overlap = len(terms & goal_terms) / math.sqrt(len(terms) * len(goal_terms))
-        return round(min(1.0, overlap * 2.0), 4)
-
-    # -------------------------------------------------------------- candidates
-    def _candidates(self, session_id: str) -> list[Candidate]:
-        goals = [p["goal"] for p in self.memory.projects() if p.get("goal")]
-        out: list[Candidate] = []
-
-        if self.tasks is not None:
-            for task in self.tasks.open_tasks()[:3]:
-                nxt = task.next_step()
-                if nxt:
-                    text = (
-                        f"Mission « {task.title} » : prochaine étape — {nxt.description}. "
-                        f"Progression {task.progress:.0%}. On continue ?"
-                    )
-                    out.append(Candidate("task", text))
-
-        questions = [
-            ep.content.strip()
-            for ep in self.memory.recent_episodes(session_id, limit=40)
-            if ep.content.strip().endswith("?") and len(ep.content.strip()) > 20
-        ]
-        for question in questions[-2:]:
-            out.append(Candidate("question", f"Une question reste ouverte : {question}"))
-
-        projects = self.memory.projects()
-        if projects:
-            p = projects[0]
-            out.append(
-                Candidate(
-                    "idea",
-                    f"Idée pour « {p['name']} » : écrire un test qui mesure la prochaine amélioration "
-                    "avant de coder la fonctionnalité.",
-                )
-            )
-
-        facts = self.memory.get_facts(limit=5)
-        if facts:
-            fact = facts[0]
-            out.append(Candidate("fact", f"À propos de « {fact.subject} » : {fact.content[:160]}"))
-
-        if self.model is not None and self.tokenizer is not None:
-            out.extend(self._model_ideas(session_id, goals))
-
-        scored: list[Candidate] = []
-        history = self.memory.recent_initiatives(self.config.lookback_messages, session_id=session_id)
-        for cand in out:
-            cand.relevance = self._relevance(cand.text, goals)
-            cand.novelty = self._novelty(cand.text, history)
-            words = tokenize(cand.text)
-            cand.specificity = min(1.0, len(set(words)) / 12.0)
-            scored.append(cand)
-        scored.sort(key=lambda c: c.score, reverse=True)
-        return scored
-
-    def _model_ideas(self, session_id: str, goals: list[str]) -> list[Candidate]:
-        from cortex.generation.sampler import GenerationConfig, generate_text
-
-        goal = goals[0] if goals else "un petit modèle de langage autonome"
-        prompt = (
-            f"Projet : {goal}\n"
-            "Propose une idée concrète et vérifiable pour faire progresser le projet en une phrase :"
+    # ------------------------------------------------------------------ public
+    def tick(
+        self,
+        session_id: Optional[str] = None,
+        now: Optional[float] = None,
+        user_last_active: Optional[float] = None,
+    ) -> List[Initiative]:
+        now = now or time.time()
+        last_sent, sent_today, pending = self._stats(now)
+        allowed, reason = self.policy.check(
+            now, last_sent, sent_today, pending, user_last_active
         )
-        ids = self.tokenizer.encode(
-            self.tokenizer.chat_prompt([{"role": "user", "content": prompt}], add_generation_prompt=True)
-        )
-        try:
-            text, _ = generate_text(
-                self.model,
-                self.tokenizer,
-                ids,
-                GenerationConfig(max_new_tokens=48, temperature=0.9, top_k=50, top_p=0.95, seed=None),
-            )
-        except Exception:
+        if not allowed:
             return []
-        text = " ".join(text.split()).strip()
-        if len(text) < 25 or len(set(tokenize(text))) < 4:
-            return []
-        return [Candidate("model_idea", text)]
 
-    # -------------------------------------------------------------------- tick
-    def tick(self, session_id: str = "default", now: float | None = None) -> Decision:
-        now = self.clock() if now is None else now
-        cfg = self.config
-        if not cfg.enabled:
-            return Decision(None, "initiative disabled")
-        if self._quiet(now):
-            return Decision(None, "quiet hours")
-
-        recent = self.memory.recent_initiatives(1, session_id=session_id)
-        if recent and now - recent[-1]["created_at"] < cfg.min_interval_sec:
-            return Decision(None, "cooldown")
-
-        day_start = datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-        if self.memory.count_initiatives_since(day_start, session_id=session_id) >= cfg.max_per_day:
-            return Decision(None, "daily cap reached")
-
-        candidates = self._candidates(session_id)
-        considered = [{"kind": c.kind, "score": c.score, "text": c.text} for c in candidates[:5]]
+        candidates = self._candidates(session_id, now)
         if not candidates:
-            return Decision(None, "no candidate", considered)
+            return []
 
-        best = candidates[0]
-        if best.novelty < cfg.min_novelty:
-            return Decision(None, f"not novel enough ({best.novelty:.2f})", considered)
-        if best.score < cfg.min_score:
-            return Decision(None, f"score below threshold ({best.score:.2f})", considered)
+        recent = self.recent(limit=30)
+        recent_messages = [item.message for item in recent]
+        selected = None
+        for candidate in sorted(candidates, key=lambda item: item["score"], reverse=True):
+            similarity = self._max_similarity(candidate["message"], recent_messages)
+            if similarity >= self.policy.similarity_threshold:
+                continue
+            score = candidate["score"] * (0.6 + 0.4 * (1.0 - similarity))
+            if score < self.policy.min_score:
+                continue
+            selected = {**candidate, "score": min(1.0, score)}
+            break
 
-        message = InitiativeMessage(best.kind, best.text, best.score, now, session_id)
-        message.delivered = bool(self.notifier.send(message))
-        self.memory.add_initiative(
-            best.kind, best.text, best.score, session_id=session_id, delivered=message.delivered, ts=now
-        )
-        return Decision(message, "delivered" if message.delivered else "delivery failed", considered)
+        if selected is None:
+            return []
+        initiative_id = self._insert(session_id, selected, now)
+        return [self.get(initiative_id)]
 
-    def history(self, session_id: str = "default", limit: int = 20) -> list[dict]:
-        return self.memory.recent_initiatives(limit, session_id=session_id)
+    def get(self, initiative_id: int) -> Optional[Initiative]:
+        with self.store.connection() as conn:
+            row = conn.execute("SELECT * FROM initiatives WHERE id=?", (initiative_id,)).fetchone()
+        return _row_to_initiative(row) if row else None
 
-    def set_enabled(self, enabled: bool) -> None:
-        self.config.enabled = enabled
-        self.memory.set_preference("initiative.enabled", "1" if enabled else "0")
+    def pending(self, session_id: Optional[str] = None) -> List[Initiative]:
+        return self._query(status="pending", session_id=session_id)
+
+    def recent(self, limit: int = 30, status: Optional[str] = None) -> List[Initiative]:
+        return self._query(limit=limit, status=status)
+
+    def mark_sent(self, initiative_id: int, now: Optional[float] = None) -> Initiative:
+        now = now or time.time()
+        with self.store.connection() as conn:
+            conn.execute(
+                "UPDATE initiatives SET status='sent', sent_at=? WHERE id=?",
+                (now, initiative_id),
+            )
+        return self.get(initiative_id)
+
+    def dismiss(self, initiative_id: int) -> Initiative:
+        with self.store.connection() as conn:
+            conn.execute("UPDATE initiatives SET status='dismissed' WHERE id=?", (initiative_id,))
+        return self.get(initiative_id)
+
+    # --------------------------------------------------------------- candidate
+    def _candidates(self, session_id: Optional[str], now: float) -> List[Dict[str, object]]:
+        candidates: List[Dict[str, object]] = []
+        for goal in self.goals.stalled(
+            older_than_seconds=self.policy.stalled_goal_seconds, now=now
+        ):
+            staleness = min(1.0, (now - goal.updated_at) / (7 * 86400))
+            candidates.append(
+                {
+                    "kind": "goal_followup",
+                    "message": (
+                        f"Objectif : {goal.title}. Progression : {goal.progress:.0%}. "
+                        "On continue ?"
+                    ),
+                    "score": 0.55 + 0.25 * goal.priority + 0.1 * staleness,
+                    "meta": {"goal_id": goal.id},
+                }
+            )
+
+        for question in self.curiosity.questions(limit=4, now=now):
+            candidates.append(
+                {
+                    "kind": question["kind"],
+                    "message": question["message"],
+                    "score": 0.48 + 0.2 * float(question["importance"]),
+                    "meta": {"source": question["source"]},
+                }
+            )
+
+        if session_id:
+            for question in self.curiosity.unanswered_questions(session_id, limit=3):
+                candidates.append(
+                    {
+                        "kind": question["kind"],
+                        "message": question["message"],
+                        "score": 0.6,
+                        "meta": {"source": question["source"]},
+                    }
+                )
+
+        for idea in self.ideas.ideas(limit=3, now=now):
+            candidates.append(
+                {
+                    "kind": idea["kind"],
+                    "message": idea["message"],
+                    "score": 0.46 + 0.15 * float(idea["importance"]),
+                    "meta": {"source": idea["source"]},
+                }
+            )
+
+        evaluation = self.self_evaluator.initiative(now=now)
+        if evaluation:
+            candidates.append(
+                {
+                    "kind": evaluation["kind"],
+                    "message": evaluation["message"],
+                    "score": float(evaluation["importance"]) + 0.1,
+                    "meta": {"source": evaluation["source"]},
+                }
+            )
+        return candidates
+
+    # ------------------------------------------------------------------ stats
+    def _stats(self, now: float) -> tuple[Optional[float], int, int]:
+        local_now = _dt.datetime.fromtimestamp(now)
+        midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        midnight_ts = midnight.timestamp()
+        with self.store.connection() as conn:
+            last_sent = conn.execute(
+                "SELECT MAX(sent_at) AS value FROM initiatives WHERE status='sent'"
+            ).fetchone()["value"]
+            sent_today = conn.execute(
+                "SELECT COUNT(*) AS c FROM initiatives WHERE status='sent' AND sent_at>=?",
+                (midnight_ts,),
+            ).fetchone()["c"]
+            pending = conn.execute(
+                "SELECT COUNT(*) AS c FROM initiatives WHERE status='pending'"
+            ).fetchone()["c"]
+        return last_sent, int(sent_today), int(pending)
+
+    def _max_similarity(self, message: str, recent_messages: List[str]) -> float:
+        if not recent_messages:
+            return 0.0
+        embedding = self.store.embedder.embed(message)
+        best = 0.0
+        for previous in recent_messages:
+            lexical = jaccard(message, previous)
+            semantic = max(0.0, cosine(embedding, self.store.embedder.embed(previous)))
+            best = max(best, lexical, semantic)
+        return best
+
+    def _insert(self, session_id: Optional[str], candidate: Dict[str, object], now: float) -> int:
+        with self.store.connection() as conn:
+            cursor = conn.execute(
+                """INSERT INTO initiatives(session_id, kind, message, score, status, meta, created_at)
+                   VALUES (?, ?, ?, ?, 'pending', ?, ?)""",
+                (
+                    session_id,
+                    candidate["kind"],
+                    candidate["message"],
+                    float(candidate["score"]),
+                    json.dumps(candidate.get("meta", {}), ensure_ascii=False),
+                    now,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def _query(
+        self,
+        status: Optional[str] = None,
+        session_id: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Initiative]:
+        sql = "SELECT * FROM initiatives WHERE 1=1"
+        params: List[object] = []
+        if status:
+            sql += " AND status=?"
+            params.append(status)
+        if session_id:
+            sql += " AND session_id=?"
+            params.append(session_id)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self.store.connection() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [_row_to_initiative(row) for row in rows]

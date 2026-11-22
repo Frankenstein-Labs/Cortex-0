@@ -2,78 +2,122 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from cortex.api.app import create_app
-from cortex.engine import CortexEngine, Settings
-from cortex.model.lm import save_checkpoint
+from cortex.api.app import Settings, create_app
 
 
-def _client(tmp_path, tiny_model, tiny_tokenizer, load_model=True):
-    tokenizer_path = tmp_path / "tokenizer.json"
-    tiny_tokenizer.save(tokenizer_path)
-    checkpoint = tmp_path / "model.safetensors"
-    save_checkpoint(tiny_model, checkpoint, extra={"step": 1})
+def make_client(tmp_path, api_key=None, model=None, tokenizer=None):
     settings = Settings(
-        checkpoint=str(checkpoint),
-        tokenizer=str(tokenizer_path),
-        memory_db=str(tmp_path / "memory.db"),
-        tasks_db=str(tmp_path / "tasks.db"),
-        task_checkpoints=str(tmp_path / "task-ckpt"),
-        initiative_enabled=False,
-        load_model=load_model,
+        db_path=str(tmp_path / "api.sqlite"),
+        workspace=str(tmp_path),
+        api_key=api_key,
+        device="cpu",
     )
-    engine = CortexEngine(settings)
-    return TestClient(create_app(engine)), engine
+    app = create_app(settings, model=model, tokenizer=tokenizer)
+    return TestClient(app)
 
 
-def test_health_and_model_info(tmp_path, tiny_model, tiny_tokenizer):
-    client, _ = _client(tmp_path, tiny_model, tiny_tokenizer)
-    health = client.get("/health").json()
-    assert health["status"] == "ok"
-    assert health["loaded"] is True
-    assert health["parameters"] == tiny_model.num_parameters()
-    info = client.get("/model/info").json()
-    assert info["vocab_size"] == tiny_tokenizer.vocab_size
+def test_health_is_public_and_v1_requires_key(tmp_path):
+    with make_client(tmp_path, api_key="secret") as client:
+        assert client.get("/health").status_code == 200
+        assert client.get("/v1/model/info").status_code == 401
+        assert client.get("/v1/model/info", headers={"x-api-key": "wrong"}).status_code == 401
+        response = client.get("/v1/model/info", headers={"x-api-key": "secret"})
+        assert response.status_code == 200
+        assert response.json()["loaded"] is False
 
 
-def test_generate_and_chat(tmp_path, tiny_model, tiny_tokenizer):
-    client, _ = _client(tmp_path, tiny_model, tiny_tokenizer)
-    resp = client.post("/generate", json={"prompt": "Once", "max_new_tokens": 4, "temperature": 0.0})
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["prompt"] == "Once"
-    assert body["generated_tokens"] >= 1
+def test_memory_goals_and_tasks(tmp_path):
+    with make_client(tmp_path) as client:
+        added = client.post(
+            "/v1/memory",
+            json={"content": "CORTEX-0 est développé par Frankenstein-Labs", "kind": "project"},
+        )
+        assert added.status_code == 200
+        found = client.get("/v1/memory/search", params={"q": "CORTEX Frankenstein"})
+        assert found.status_code == 200
+        assert found.json()["hits"]
 
-    chat = client.post("/chat", json={"message": "Hello", "max_new_tokens": 4, "temperature": 0.0})
-    assert chat.status_code == 200
-    assert chat.json()["session_id"] == "default"
+        goal = client.post("/v1/goals", json={"title": "Entraîner le modèle", "priority": 0.9})
+        assert goal.status_code == 200
+        goal_id = goal.json()["id"]
+        patched = client.patch(f"/v1/goals/{goal_id}", json={"progress": 0.5})
+        assert patched.json()["progress"] == 0.5
 
-    memory = client.get("/memory/search", params={"q": "Hello"}).json()
-    assert memory["results"]
-
-
-def test_unloaded_model_returns_503(tmp_path, tiny_model, tiny_tokenizer):
-    client, _ = _client(tmp_path, tiny_model, tiny_tokenizer, load_model=False)
-    assert client.get("/health").json()["status"] == "model_not_loaded"
-    assert client.post("/generate", json={"prompt": "x"}).status_code == 503
-
-
-def test_tasks_api(tmp_path, tiny_model, tiny_tokenizer):
-    client, _ = _client(tmp_path, tiny_model, tiny_tokenizer)
-    created = client.post("/tasks", json={"title": "Build", "steps": ["a", "b"]}).json()
-    task_id = created["id"]
-    assert client.get(f"/tasks/{task_id}").json()["title"] == "Build"
-    updated = client.post(f"/tasks/{task_id}/instructions", json={"instruction": "also c"}).json()
-    assert updated["revision"] == 1
-    resumed = client.get(f"/tasks/{task_id}/resume").json()
-    assert resumed["next_step"]["description"] == "a"
-    assert len(client.get("/tasks").json()["tasks"]) == 1
-    assert client.get("/tasks/9999").status_code == 404
+        task = client.post("/v1/tasks", json={"kind": "echo", "payload": {"x": 1}})
+        assert task.status_code == 200
+        assert client.get("/v1/tasks/stats").json()["queued"] == 1
+        assert client.post(f"/v1/tasks/{task.json()['id']}/cancel").json()["status"] == "cancelled"
 
 
-def test_initiative_and_tools(tmp_path, tiny_model, tiny_tokenizer):
-    client, _ = _client(tmp_path, tiny_model, tiny_tokenizer)
-    decision = client.post("/initiative/tick").json()
-    assert "message" in decision and "reason" in decision
-    assert decision["message"] is None  # disabled in test settings
-    tools = client.get("/tools").json()["tools"]
-    assert any(t["name"] == "calculator" for t in tools)
+def test_chat_fallback_without_model(tmp_path):
+    with make_client(tmp_path) as client:
+        response = client.post("/v1/chat", json={"session_id": "s1", "message": "Bonjour CORTEX"})
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["used_model"] is False
+        assert payload["text"]
+        assert payload["session_id"] == "s1"
+        events = client.get("/v1/sessions").json()["sessions"]
+        assert events[0]["session_id"] == "s1"
+
+
+def test_chat_stream_sse(tmp_path):
+    with make_client(tmp_path) as client:
+        with client.stream(
+            "POST", "/v1/chat/stream", json={"session_id": "s2", "message": "Bonjour"}
+        ) as response:
+            body = "".join(response.iter_text())
+        assert response.status_code == 200
+        assert "data:" in body
+        assert '"done": true' in body
+
+
+def test_generate_requires_model(tmp_path):
+    with make_client(tmp_path) as client:
+        response = client.post("/v1/generate", json={"prompt": "Bonjour", "max_new_tokens": 4})
+        assert response.status_code == 503
+
+
+def test_generate_and_reason_with_model(tmp_path, tiny_model, tokenizer):
+    with make_client(tmp_path, model=tiny_model, tokenizer=tokenizer) as client:
+        generated = client.post(
+            "/v1/generate",
+            json={"prompt": "Bonjour", "max_new_tokens": 4, "temperature": 0.0},
+        )
+        assert generated.status_code == 200
+        payload = generated.json()
+        assert payload["model"]["loaded"] is True
+        assert isinstance(payload["text"], str)
+        assert payload["generated_tokens"] <= 4
+
+        chat = client.post("/v1/chat", json={"session_id": "m1", "message": "Bonjour"})
+        assert chat.status_code == 200
+        assert chat.json()["used_model"] is True
+
+        reasoned = client.post(
+            "/v1/reason",
+            json={"question": "Combien font 2 + 2 ?", "expected": "4", "num_samples": 1, "max_new_tokens": 8},
+        )
+        assert reasoned.status_code == 200
+        assert "candidates" in reasoned.json()
+
+
+def test_mission_requires_model(tmp_path):
+    with make_client(tmp_path) as client:
+        mission = client.post("/v1/missions", json={"title": "Test", "instruction": "Créer un fichier"})
+        assert mission.status_code == 200
+        run = client.post(f"/v1/missions/{mission.json()['id']}/run", json={"max_steps": 1})
+        assert run.status_code == 503
+
+
+def test_memory_rejects_unknown_kind(tmp_path):
+    with make_client(tmp_path) as client:
+        response = client.post("/v1/memory", json={"content": "x", "kind": "invented"})
+        assert response.status_code == 400
+
+
+def test_tools_endpoint(tmp_path):
+    with make_client(tmp_path) as client:
+        tools = client.get("/v1/tools").json()["tools"]
+        names = {tool["name"] for tool in tools}
+        assert {"read_file", "write_file", "run_tests", "git_status"} <= names

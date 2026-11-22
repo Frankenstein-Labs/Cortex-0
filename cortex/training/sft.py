@@ -1,160 +1,162 @@
-"""Supervised fine-tuning on chat-formatted examples.
-
-Only assistant tokens contribute to the loss. Examples are built from
-TinyStories with deterministic templates, so the run is reproducible and does
-not depend on an external instruction dataset.
-"""
+"""Supervised fine-tuning on the CORTEX chat format."""
 
 from __future__ import annotations
 
 import json
-import random
+import math
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Dict, Optional
 
 import torch
+from torch.utils.data import DataLoader
 
-from cortex.model.lm import save_checkpoint
-from cortex.training.trainer import cosine_lr, resolve_device, resolve_dtype
+from ..model.transformer import CortexForCausalLM
+from ..tokenizer.bpe import CortexTokenizer
+from .data import ChatSFTDataset, collate_sft
+from .trainer import cosine_lr, save_pretrained, set_seed
 
 
 @dataclass
 class SFTConfig:
-    max_steps: int = 300
     batch_size: int = 8
-    seq_len: int = 256
-    learning_rate: float = 2e-4
-    warmup_steps: int = 30
+    grad_accum_steps: int = 1
+    max_steps: int = 300
+    learning_rate: float = 1e-4
     min_lr_ratio: float = 0.1
-    weight_decay: float = 0.05
+    warmup_steps: int = 20
+    weight_decay: float = 0.01
     grad_clip: float = 1.0
-    log_interval: int = 20
+    eval_interval: int = 50
+    save_interval: int = 100
+    max_length: int = 256
+    val_ratio: float = 0.1
     seed: int = 1337
-    device: str = "cpu"
-    dtype: str = "float32"
-    run_name: str = "cortex-0-nano-sft"
+    device: str = "auto"
+    out_dir: str = "checkpoints/tiny-cpu-sft"
+
+    def to_dict(self) -> dict:
+        return asdict(self)
 
 
-def build_examples(texts: list[str], max_examples: int | None = None, seed: int = 1337) -> list[dict[str, str]]:
-    """Turn stories into instruction/response pairs with simple templates."""
-    rng = random.Random(seed)
-    examples: list[dict[str, str]] = []
-    for text in texts:
-        text = " ".join(text.split())
-        if len(text) < 120:
-            continue
-        sentences = [s.strip() for s in text.replace("\n", " ").split(". ") if s.strip()]
-        if len(sentences) < 3:
-            continue
-        opening = sentences[0][:120]
-        templates = [
-            ("Continue the story that starts like this:", text),
-            ("Write a short children's story. Start with:", text),
-            ("Tell me a story about a character who appears in this opening:", text),
-        ]
-        prompt, response = rng.choice(templates)
-        examples.append({"prompt": f"{prompt}\n{opening}", "response": text})
-        if max_examples and len(examples) >= max_examples:
-            break
-    return examples
-
-
-class SFTDataset:
-    def __init__(self, tokenizer, examples: list[dict[str, str]], seq_len: int) -> None:
+class SFTTrainer:
+    def __init__(
+        self,
+        model: CortexForCausalLM,
+        tokenizer: CortexTokenizer,
+        dataset: ChatSFTDataset,
+        config: SFTConfig,
+        val_dataset: Optional[ChatSFTDataset] = None,
+    ) -> None:
+        self.model = model
         self.tokenizer = tokenizer
-        self.seq_len = seq_len
-        self.samples: list[tuple[list[int], list[int]]] = []
-        for ex in examples:
-            prompt_ids = tokenizer.encode(
-                tokenizer.chat_prompt([{"role": "user", "content": ex["prompt"]}], add_generation_prompt=True)
+        self.dataset = dataset
+        self.val_dataset = val_dataset
+        self.config = config
+        self.device = torch.device(
+            "cuda" if config.device == "auto" and torch.cuda.is_available() else
+            ("cpu" if config.device == "auto" else config.device)
+        )
+        self.model.to(self.device)
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
+        )
+        self.out_dir = Path(config.out_dir)
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.log_path = self.out_dir / "sft_log.jsonl"
+
+    def _loader(self, dataset: ChatSFTDataset, shuffle: bool) -> DataLoader:
+        return DataLoader(
+            dataset,
+            batch_size=self.config.batch_size,
+            shuffle=shuffle,
+            drop_last=shuffle,
+            collate_fn=lambda batch: collate_sft(batch, self.tokenizer.pad_token_id),
+        )
+
+    def train(self) -> Dict[str, float]:
+        set_seed(self.config.seed)
+        loader = self._loader(self.dataset, shuffle=True)
+        iterator = iter(loader)
+        self.model.train()
+        started = time.time()
+        last_loss = float("nan")
+        for step in range(self.config.max_steps):
+            lr = cosine_lr(
+                step,
+                self.config.max_steps,
+                self.config.warmup_steps,
+                self.config.learning_rate,
+                self.config.min_lr_ratio,
             )
-            response_ids = tokenizer.encode(ex["response"]) + [tokenizer.end_id]
-            input_ids = (prompt_ids + response_ids)[: seq_len + 1]
-            if len(input_ids) < 8:
-                continue
-            labels = ([-100] * len(prompt_ids) + response_ids)[: len(input_ids)]
-            self.samples.append((input_ids, labels))
+            for group in self.optimizer.param_groups:
+                group["lr"] = lr
+            self.optimizer.zero_grad(set_to_none=True)
+            loss_value = 0.0
+            for _ in range(self.config.grad_accum_steps):
+                try:
+                    batch = next(iterator)
+                except StopIteration:
+                    iterator = iter(loader)
+                    batch = next(iterator)
+                batch = {key: value.to(self.device) for key, value in batch.items()}
+                outputs = self.model(**batch)
+                loss = outputs["loss"]
+                (loss / self.config.grad_accum_steps).backward()
+                loss_value += float(loss.detach()) / self.config.grad_accum_steps
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
+            self.optimizer.step()
+            last_loss = loss_value
+            if (step + 1) % 10 == 0 or step == 0:
+                record = {"step": step + 1, "loss": round(loss_value, 5), "lr": round(lr, 8)}
+                with self.log_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(record) + "\n")
+                print(json.dumps(record), flush=True)
+            if self.val_dataset is not None and (step + 1) % self.config.eval_interval == 0:
+                metrics = self.evaluate()
+                print(json.dumps({"step": step + 1, **metrics}), flush=True)
+                self.model.train()
+            if (step + 1) % self.config.save_interval == 0:
+                save_pretrained(self.model, self.tokenizer, self.model.config, self.out_dir / f"checkpoint-{step + 1}")
+        save_pretrained(self.model, self.tokenizer, self.model.config, self.out_dir)
+        return {
+            "steps": self.config.max_steps,
+            "final_loss": last_loss,
+            "elapsed_seconds": round(time.time() - started, 1),
+        }
 
-    def __len__(self) -> int:
-        return len(self.samples)
-
-    def batch(self, batch_size: int, generator: torch.Generator) -> tuple[torch.Tensor, torch.Tensor]:
-        idx = torch.randint(0, len(self.samples), (batch_size,), generator=generator).tolist()
-        max_len = max(len(self.samples[i][0]) for i in idx)
-        pad = self.tokenizer.pad_id
-        xs, ys = [], []
-        for i in idx:
-            ids, labels = self.samples[i]
-            pad_n = max_len - len(ids)
-            xs.append(ids + [pad] * pad_n)
-            ys.append(labels + [-100] * pad_n)
-        return torch.tensor(xs, dtype=torch.long), torch.tensor(ys, dtype=torch.long)
-
-
-def run_sft(
-    model,
-    tokenizer,
-    examples: list[dict[str, str]],
-    cfg: SFTConfig,
-    output_dir: str | Path = "checkpoints",
-) -> dict:
-    device = resolve_device(cfg.device)
-    dtype = resolve_dtype(cfg.dtype, device)
-    model.to(device)
-    model.train()
-    dataset = SFTDataset(tokenizer, examples, cfg.seq_len)
-    if len(dataset) < cfg.batch_size:
-        raise ValueError("not enough SFT examples")
-    optim = torch.optim.AdamW(model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
-    generator = torch.Generator().manual_seed(cfg.seed)
-    out = Path(output_dir) / cfg.run_name
-    out.mkdir(parents=True, exist_ok=True)
-    started = time.time()
-    losses = []
-    for step in range(cfg.max_steps):
-        lr = cosine_lr(step, _as_train_cfg(cfg))
-        for group in optim.param_groups:
-            group["lr"] = lr
-        x, y = dataset.batch(cfg.batch_size, generator)
-        x, y = x.to(device), y.to(device)
-        out_dict = model(x, targets=y)
-        optim.zero_grad()
-        out_dict["loss"].backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
-        optim.step()
-        losses.append(float(out_dict["loss"].detach()))
-        if (step + 1) % cfg.log_interval == 0 or step == 0:
-            record = {
-                "step": step + 1,
-                "loss": round(sum(losses[-cfg.log_interval :]) / len(losses[-cfg.log_interval :]), 6),
-                "lr": round(lr, 8),
-                "elapsed_sec": round(time.time() - started, 2),
-            }
-            print(json.dumps(record), flush=True)
-    save_checkpoint(
-        model,
-        out / "sft.safetensors",
-        extra={"sft_steps": cfg.max_steps, "sft_examples": len(dataset), "instruction_tuned": True},
-    )
-    summary = {
-        "run_name": cfg.run_name,
-        "steps": cfg.max_steps,
-        "examples": len(dataset),
-        "first_loss": round(losses[0], 4),
-        "last_loss": round(sum(losses[-10:]) / min(10, len(losses)), 4),
-        "wall_time_sec": round(time.time() - started, 2),
-    }
-    (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-    return summary
+    @torch.no_grad()
+    def evaluate(self) -> Dict[str, float]:
+        if self.val_dataset is None:
+            return {"val_loss": float("nan")}
+        self.model.eval()
+        loader = self._loader(self.val_dataset, shuffle=False)
+        total, count = 0.0, 0
+        for batch in loader:
+            batch = {key: value.to(self.device) for key, value in batch.items()}
+            loss = self.model(**batch)["loss"]
+            total += float(loss.detach())
+            count += 1
+        loss = total / max(1, count)
+        return {"val_loss": round(loss, 5), "val_perplexity": round(math.exp(loss), 3)}
 
 
-def _as_train_cfg(cfg: SFTConfig):
-    from cortex.config import TrainConfig
+def split_dataset(dataset: ChatSFTDataset, val_ratio: float) -> tuple[ChatSFTDataset, ChatSFTDataset]:
+    import random
 
-    return TrainConfig(
-        max_steps=cfg.max_steps,
-        warmup_steps=cfg.warmup_steps,
-        learning_rate=cfg.learning_rate,
-        min_lr_ratio=cfg.min_lr_ratio,
+    indices = list(range(len(dataset)))
+    random.Random(1337).shuffle(indices)
+    split = max(1, int(len(indices) * val_ratio))
+    val_indices = set(indices[:split])
+
+    class Subset(ChatSFTDataset):
+        def __init__(self, base, chosen):
+            self.tokenizer = base.tokenizer
+            self.max_length = base.max_length
+            self.records = [base.records[index] for index in chosen]
+
+    return (
+        Subset(dataset, [index for index in indices if index not in val_indices]),
+        Subset(dataset, sorted(val_indices)),
     )

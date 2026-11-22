@@ -1,0 +1,27 @@
+nohup: ignoring input
+{"step": 1, "loss": 3.90951, "lr": 5e-06}
+{"step": 10, "loss": 3.17991, "lr": 5e-05}
+{"step": 20, "loss": 2.18665, "lr": 0.0001}
+{"step": 30, "loss": 1.35727, "lr": 9.945e-05}
+{"step": 40, "loss": 0.88315, "lr": 9.755e-05}
+{"step": 50, "loss": 0.55397, "lr": 9.436e-05}
+{"step": 50, "val_loss": 0.52193, "val_perplexity": 1.685}
+{"step": 60, "loss": 0.32119, "lr": 8.997e-05}
+{"step": 70, "loss": 0.6184, "lr": 8.452e-05}
+{"step": 80, "loss": 0.08033, "lr": 7.818e-05}
+{"step": 90, "loss": 0.05932, "lr": 7.113e-05}
+{"step": 100, "loss": 0.20607, "lr": 6.359e-05}
+{"step": 100, "val_loss": 0.1437, "val_perplexity": 1.155}
+{"step": 110, "loss": 0.19919, "lr": 5.579e-05}
+{"step": 120, "loss": 0.0391, "lr": 4.796e-05}
+{"step": 130, "loss": 0.09641, "lr": 4.035e-05}
+{"step": 140, "loss": 0.23361, "lr": 3.318e-05}
+{"step": 150, "loss": 0.20535, "lr": 2.668e-05}
+{"step": 150, "val_loss": 0.12165, "val_perplexity": 1.129}
+{"step": 160, "loss": 0.02725, "lr": 2.104e-05}
+{"step": 170, "loss": 0.02534, "lr": 1.643e-05}
+{"step": 180, "loss": 0.02406, "lr": 1.299e-05}
+{"step": 190, "loss": 0.09003, "lr": 1.083e-05}
+{"step": 200, "loss": 0.02384, "lr": 1.001e-05}
+{"step": 200, "val_loss": 0.11587, "val_perplexity": 1.123}
+{"status": "ok", "steps": 200, "final_loss": 0.02384195849299431, "elapsed_seconds": 41.2}

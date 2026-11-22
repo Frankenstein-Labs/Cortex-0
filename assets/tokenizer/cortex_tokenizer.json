@@ -1,0 +1,16 @@
+{
+  "type": "cortex-byte-level-bpe",
+  "special_tokens": [
+    "<|pad|>",
+    "<|bos|>",
+    "<|eos|>",
+    "<|unk|>",
+    "<|system|>",
+    "<|user|>",
+    "<|assistant|>",
+    "<|end|>",
+    "<|tool|>",
+    "<|observation|>"
+  ],
+  "vocab_size": 4096
+}

@@ -1,391 +1,607 @@
-"""Multi-tier memory for CORTEX-0.
+"""Persistent multi-level memory backed by SQLite (FTS5 + hashed embeddings).
 
-Tiers are deliberately separated:
+Levels
+------
+working      current turn scratchpad (short TTL)
+short_term   recent conversation facts
+long_term    durable facts worth keeping
+episodic     raw conversation turns
+semantic     consolidated summaries
+project      decisions, architecture notes
+preference   explicit user preferences
 
-* working memory  - in-process, bounded by a token budget
-* episodic memory - conversation turns and events (SQLite)
-* semantic memory - facts and consolidated knowledge (SQLite)
-* preference memory - user settings (SQLite)
-
-This is *external* memory. It does not modify the model weights; anything that
-should become model knowledge must go through a controlled fine-tuning run.
+This is *external* memory.  It never updates model weights.
 """
 
 from __future__ import annotations
 
-import math
+import json
 import re
 import sqlite3
+import threading
 import time
-from collections import Counter, deque
-from dataclasses import dataclass, field
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Dict, Iterable, List, Optional, Sequence
 
-_TOKEN_RE = re.compile(r"[a-z0-9àâäéèêëîïôöùûüç']+", re.IGNORECASE)
-_STOPWORDS = {
-    "the", "a", "an", "and", "or", "but", "if", "then", "of", "to", "in", "on", "for", "with",
-    "is", "are", "was", "were", "be", "been", "it", "this", "that", "i", "you", "he", "she",
-    "we", "they", "le", "la", "les", "un", "une", "des", "et", "ou", "de", "du", "en", "est",
-    "sont", "je", "tu", "il", "elle", "nous", "vous", "ils", "elles", "que", "qui", "à",
+from .consolidation import extract_preferences, extractive_summary
+from .retrieval import (
+    HashingEmbedder,
+    cosine,
+    dedupe_texts,
+    recency_score,
+)
+
+KINDS = {"working", "short_term", "long_term", "episodic", "semantic", "project", "preference"}
+KIND_HALF_LIFE_DAYS = {
+    "working": 1 / 24,
+    "short_term": 1,
+    "long_term": 90,
+    "episodic": 14,
+    "semantic": 180,
+    "project": 60,
+    "preference": 365,
 }
-
-
-def tokenize(text: str) -> list[str]:
-    return [t.lower() for t in _TOKEN_RE.findall(text) if t.lower() not in _STOPWORDS and len(t) > 1]
-
-
-def estimate_tokens(text: str) -> int:
-    """Cheap token estimate used for context budgeting (chars / 4)."""
-    return max(1, math.ceil(len(text) / 4))
+PREFERENCE_HINTS = re.compile(
+    r"(je préfère|j'aime|rappelle-toi|souviens-toi|retiens que|i prefer|i like|remember that)",
+    re.I,
+)
 
 
 @dataclass
-class Episode:
+class MemoryHit:
     id: int
-    session_id: str
-    role: str
+    kind: str
     content: str
-    ts: float
-    importance: float = 0.5
-    tags: str = ""
+    summary: str
+    importance: float
+    created_at: float
+    score: float = 0.0
+    lexical: float = 0.0
+    recency: float = 0.0
+    semantic: float = 0.0
 
-    def as_dict(self) -> dict:
+    def to_dict(self) -> dict:
         return {
             "id": self.id,
-            "session_id": self.session_id,
-            "role": self.role,
+            "kind": self.kind,
             "content": self.content,
-            "ts": self.ts,
-            "importance": self.importance,
-            "tags": self.tags,
+            "summary": self.summary,
+            "importance": round(self.importance, 3),
+            "created_at": self.created_at,
+            "score": round(self.score, 4),
+            "lexical": round(self.lexical, 4),
+            "recency": round(self.recency, 4),
+            "semantic": round(self.semantic, 4),
         }
 
 
-@dataclass
-class Fact:
-    id: int
-    subject: str
-    content: str
-    source: str
-    confidence: float
-    ts: float
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    content TEXT NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    importance REAL NOT NULL DEFAULT 0.5,
+    source TEXT NOT NULL DEFAULT '',
+    session_id TEXT,
+    meta TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL,
+    last_accessed REAL,
+    access_count INTEGER NOT NULL DEFAULT 0,
+    embedding BLOB
+);
+CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind);
+CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    meta TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, id);
+CREATE TABLE IF NOT EXISTS preferences (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS kv (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS reasoning_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    question TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    verified INTEGER NOT NULL,
+    confidence REAL NOT NULL,
+    payload TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS initiatives (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT,
+    kind TEXT NOT NULL,
+    message TEXT NOT NULL,
+    score REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    meta TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL,
+    sent_at REAL
+);
+CREATE TABLE IF NOT EXISTS missions (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    instruction TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    plan TEXT NOT NULL DEFAULT '[]',
+    instructions TEXT NOT NULL DEFAULT '[]',
+    checkpoints TEXT NOT NULL DEFAULT '[]',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS goals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    priority REAL NOT NULL DEFAULT 0.5,
+    progress REAL NOT NULL DEFAULT 0.0,
+    meta TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 3,
+    priority INTEGER NOT NULL DEFAULT 0,
+    run_at REAL NOT NULL,
+    locked_by TEXT,
+    locked_at REAL,
+    error TEXT,
+    result TEXT,
+    idempotency_key TEXT UNIQUE,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, run_at);
+"""
 
-    def as_dict(self) -> dict:
-        return {
-            "id": self.id,
-            "subject": self.subject,
-            "content": self.content,
-            "source": self.source,
-            "confidence": self.confidence,
-            "ts": self.ts,
-        }
-
-
-class WorkingMemory:
-    """Bounded, token-budgeted scratchpad for the current turn."""
-
-    def __init__(self, max_tokens: int = 2048) -> None:
-        self.max_tokens = max_tokens
-        self._items: deque[tuple[str, int]] = deque()
-        self._tokens = 0
-
-    def add(self, text: str) -> None:
-        cost = estimate_tokens(text)
-        self._items.append((text, cost))
-        self._tokens += cost
-        while self._tokens > self.max_tokens and self._items:
-            _, removed = self._items.popleft()
-            self._tokens -= removed
-
-    def render(self) -> str:
-        return "\n".join(text for text, _ in self._items)
-
-    def clear(self) -> None:
-        self._items.clear()
-        self._tokens = 0
-
-    def __len__(self) -> int:
-        return len(self._items)
-
-    @property
-    def tokens(self) -> int:
-        return self._tokens
+FTS_SCHEMA = """
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+    content, summary, content='memories', content_rowid='id',
+    tokenize='unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, content, summary) VALUES (new.id, new.content, new.summary);
+END;
+CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content, summary)
+    VALUES ('delete', old.id, old.content, old.summary);
+END;
+CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content, summary)
+    VALUES ('delete', old.id, old.content, old.summary);
+    INSERT INTO memories_fts(rowid, content, summary) VALUES (new.id, new.content, new.summary);
+END;
+"""
 
 
 class MemoryStore:
-    """SQLite-backed episodic, semantic and preference memory."""
-
-    def __init__(self, path: str | Path = "cortex_memory.db") -> None:
-        self.path = str(path)
-        if self.path != ":memory:":
-            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        self.working = WorkingMemory()
-        self._init_schema()
-
-    def _init_schema(self) -> None:
-        self._conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS episodes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                ts REAL NOT NULL,
-                importance REAL NOT NULL DEFAULT 0.5,
-                tags TEXT NOT NULL DEFAULT ''
-            );
-            CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id, ts);
-            CREATE TABLE IF NOT EXISTS facts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                subject TEXT NOT NULL,
-                content TEXT NOT NULL,
-                source TEXT NOT NULL DEFAULT '',
-                confidence REAL NOT NULL DEFAULT 0.7,
-                ts REAL NOT NULL,
-                UNIQUE(subject, content)
-            );
-            CREATE TABLE IF NOT EXISTS preferences (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at REAL NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS projects (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
-                goal TEXT NOT NULL DEFAULT '',
-                status TEXT NOT NULL DEFAULT 'active',
-                notes TEXT NOT NULL DEFAULT '',
-                updated_at REAL NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS initiatives (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL DEFAULT 'default',
-                kind TEXT NOT NULL,
-                content TEXT NOT NULL,
-                score REAL NOT NULL,
-                created_at REAL NOT NULL,
-                delivered INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS idx_initiatives_time ON initiatives(created_at);
-            """
-        )
-        self._conn.commit()
-
-    # ------------------------------------------------------------------ episodes
-    def add_episode(
+    def __init__(
         self,
-        session_id: str,
-        role: str,
+        path: str | Path = "cortex.sqlite",
+        embedder: Optional[HashingEmbedder] = None,
+        weights: Optional[Dict[str, float]] = None,
+    ) -> None:
+        self.path = str(path)
+        self.embedder = embedder or HashingEmbedder()
+        self.weights = weights or {
+            "lexical": 0.45,
+            "recency": 0.25,
+            "importance": 0.15,
+            "semantic": 0.15,
+        }
+        self._lock = threading.RLock()
+        self._memory_conn: Optional[sqlite3.Connection] = None
+        if self.path == ":memory:":
+            self._memory_conn = sqlite3.connect(":memory:", check_same_thread=False)
+            self._memory_conn.row_factory = sqlite3.Row
+        else:
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        self.fts = self._init_schema()
+
+    # ------------------------------------------------------------- connection
+    @contextmanager
+    def _connect(self):
+        if self._memory_conn is not None:
+            with self._lock:
+                try:
+                    yield self._memory_conn
+                    self._memory_conn.commit()
+                except Exception:
+                    self._memory_conn.rollback()
+                    raise
+            return
+        connection = sqlite3.connect(self.path, timeout=30)
+        connection.row_factory = sqlite3.Row
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def connection(self):
+        """Public accessor used by the planning and task modules."""
+        return self._connect()
+
+    def _init_schema(self) -> bool:
+        with self._connect() as conn:
+            if self.path != ":memory:":
+                conn.execute("PRAGMA journal_mode=WAL")
+            conn.executescript(SCHEMA)
+            try:
+                conn.executescript(FTS_SCHEMA)
+                return True
+            except sqlite3.OperationalError:
+                return False
+
+    # ------------------------------------------------------------------ write
+    def add(
+        self,
         content: str,
-        importance: float = 0.5,
-        tags: str = "",
-        ts: float | None = None,
+        kind: str = "long_term",
+        importance: Optional[float] = None,
+        source: str = "",
+        session_id: Optional[str] = None,
+        meta: Optional[dict] = None,
+        summary: Optional[str] = None,
     ) -> int:
-        cur = self._conn.execute(
-            "INSERT INTO episodes(session_id, role, content, ts, importance, tags) VALUES (?,?,?,?,?,?)",
-            (session_id, role, content, ts if ts is not None else time.time(), importance, tags),
-        )
-        self._conn.commit()
-        return int(cur.lastrowid)
+        if kind not in KINDS:
+            raise ValueError(f"unknown memory kind: {kind!r}")
+        content = content.strip()
+        if not content:
+            raise ValueError("memory content cannot be empty")
+        if importance is None:
+            importance = self._estimate_importance(content, kind)
+        importance = float(max(0.0, min(1.0, importance)))
+        if summary is None:
+            summary = self._make_summary(content)
+        embedding = self.embedder.to_bytes(self.embedder.embed(content))
+        now = time.time()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """INSERT INTO memories
+                   (kind, content, summary, importance, source, session_id, meta,
+                    created_at, last_accessed, access_count, embedding)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
+                (
+                    kind,
+                    content,
+                    summary,
+                    importance,
+                    source,
+                    session_id,
+                    json.dumps(meta or {}, ensure_ascii=False),
+                    now,
+                    now,
+                    embedding,
+                ),
+            )
+            return int(cursor.lastrowid)
 
-    def recent_episodes(self, session_id: str | None = None, limit: int = 20) -> list[Episode]:
-        if session_id is None:
-            rows = self._conn.execute("SELECT * FROM episodes ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT * FROM episodes WHERE session_id=? ORDER BY ts DESC LIMIT ?", (session_id, limit)
-            ).fetchall()
-        return [Episode(**dict(r)) for r in rows][::-1]
-
-    def search_episodes(self, query: str, limit: int = 8, now: float | None = None) -> list[Episode]:
-        """Rank episodes with TF-IDF-ish overlap plus a mild recency bonus."""
-        q_terms = Counter(tokenize(query))
-        if not q_terms:
-            return self.recent_episodes(limit=limit)
-        rows = [Episode(**dict(r)) for r in self._conn.execute("SELECT * FROM episodes").fetchall()]
-        if not rows:
-            return []
-        doc_terms = [Counter(tokenize(r.content)) for r in rows]
-        n_docs = len(rows)
-        df = Counter()
-        for counts in doc_terms:
-            df.update(counts.keys())
-        now = now if now is not None else time.time()
-        scored: list[tuple[float, Episode]] = []
-        for ep, counts in zip(rows, doc_terms):
-            length = max(1, sum(counts.values()))
-            score = 0.0
-            for term, qf in q_terms.items():
-                tf = counts.get(term, 0)
-                if tf:
-                    idf = math.log(1 + n_docs / (1 + df[term]))
-                    score += (1 + math.log(tf)) * idf * (1 + 0.1 * qf) / math.sqrt(length)
-            if score > 0:
-                age_days = max(0.0, (now - ep.ts) / 86400)
-                score *= 0.5 ** (age_days / 30)  # 30-day half-life
-                score *= 0.5 + ep.importance
-                scored.append((score, ep))
-        scored.sort(key=lambda pair: pair[0], reverse=True)
-        return [ep for _, ep in scored[:limit]]
-
-    # ---------------------------------------------------------------------- facts
-    def add_fact(
-        self, subject: str, content: str, source: str = "", confidence: float = 0.7, ts: float | None = None
+    def add_event(
+        self, session_id: str, role: str, content: str, meta: Optional[dict] = None
     ) -> int:
-        cur = self._conn.execute(
-            "INSERT OR IGNORE INTO facts(subject, content, source, confidence, ts) VALUES (?,?,?,?,?)",
-            (subject, content, source, confidence, ts if ts is not None else time.time()),
-        )
-        self._conn.commit()
-        if cur.lastrowid:
-            return int(cur.lastrowid)
-        row = self._conn.execute(
-            "SELECT id FROM facts WHERE subject=? AND content=?", (subject, content)
-        ).fetchone()
-        return int(row["id"])
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "INSERT INTO events(session_id, role, content, meta, created_at) VALUES (?, ?, ?, ?, ?)",
+                (session_id, role, content, json.dumps(meta or {}, ensure_ascii=False), time.time()),
+            )
+            return int(cursor.lastrowid)
 
-    def get_facts(self, subject: str | None = None, limit: int = 50) -> list[Fact]:
-        if subject is None:
-            rows = self._conn.execute("SELECT * FROM facts ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT * FROM facts WHERE subject=? ORDER BY ts DESC LIMIT ?", (subject, limit)
-            ).fetchall()
-        return [Fact(**dict(r)) for r in rows]
-
-    # ---------------------------------------------------------------- preferences
     def set_preference(self, key: str, value: str) -> None:
-        self._conn.execute(
-            "INSERT INTO preferences(key, value, updated_at) VALUES (?,?,?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-            (key, value, time.time()),
-        )
-        self._conn.commit()
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO preferences(key, value, updated_at) VALUES (?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+                (key, value, time.time()),
+            )
 
-    def get_preference(self, key: str, default: str | None = None) -> str | None:
-        row = self._conn.execute("SELECT value FROM preferences WHERE key=?", (key,)).fetchone()
+    def get_preference(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT value FROM preferences WHERE key=?", (key,)).fetchone()
         return row["value"] if row else default
 
-    def all_preferences(self) -> dict[str, str]:
-        rows = self._conn.execute("SELECT key, value FROM preferences").fetchall()
-        return {r["key"]: r["value"] for r in rows}
+    def preferences(self) -> Dict[str, str]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT key, value FROM preferences ORDER BY key").fetchall()
+        return {row["key"]: row["value"] for row in rows}
 
-    # -------------------------------------------------------------------- projects
-    def upsert_project(self, name: str, goal: str = "", status: str = "active", notes: str = "") -> None:
-        self._conn.execute(
-            "INSERT INTO projects(name, goal, status, notes, updated_at) VALUES (?,?,?,?,?) "
-            "ON CONFLICT(name) DO UPDATE SET goal=excluded.goal, status=excluded.status, "
-            "notes=excluded.notes, updated_at=excluded.updated_at",
-            (name, goal, status, notes, time.time()),
-        )
-        self._conn.commit()
+    def kv_set(self, key: str, value: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO kv(key, value, updated_at) VALUES (?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+                (key, value, time.time()),
+            )
 
-    def projects(self) -> list[dict]:
-        rows = self._conn.execute("SELECT * FROM projects ORDER BY updated_at DESC").fetchall()
-        return [dict(r) for r in rows]
+    def kv_get(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else default
 
-    # ----------------------------------------------------------------- initiatives
-    def add_initiative(self, kind: str, content: str, score: float, session_id: str = "default", delivered: bool = True, ts: float | None = None) -> int:
-        cur = self._conn.execute(
-            "INSERT INTO initiatives(session_id, kind, content, score, created_at, delivered) VALUES (?,?,?,?,?,?)",
-            (session_id, kind, content, score, ts if ts is not None else time.time(), 1 if delivered else 0),
-        )
-        self._conn.commit()
-        return int(cur.lastrowid)
+    def delete(self, memory_id: int) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute("DELETE FROM memories WHERE id=?", (memory_id,))
+            return cursor.rowcount > 0
 
-    def recent_initiatives(self, limit: int = 20, session_id: str | None = None) -> list[dict]:
-        if session_id:
-            rows = self._conn.execute(
-                "SELECT * FROM initiatives WHERE session_id=? ORDER BY created_at DESC LIMIT ?",
+    def record_reasoning(self, payload: dict) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """INSERT INTO reasoning_runs(question, answer, verified, confidence, payload, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    payload.get("question", ""),
+                    payload.get("answer", ""),
+                    int(bool(payload.get("verified"))),
+                    float(payload.get("confidence", 0.0)),
+                    json.dumps(payload, ensure_ascii=False),
+                    time.time(),
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    # ------------------------------------------------------------------- read
+    def get(self, memory_id: int) -> Optional[MemoryHit]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM memories WHERE id=?", (memory_id,)).fetchone()
+        return self._to_hit(row) if row else None
+
+    def search(
+        self,
+        query: str,
+        limit: int = 8,
+        kinds: Optional[Sequence[str]] = None,
+        min_score: float = 0.0,
+        now: Optional[float] = None,
+    ) -> List[MemoryHit]:
+        now = now or time.time()
+        query = query.strip()
+        query_embedding = self.embedder.embed(query)
+        rows: List[sqlite3.Row] = []
+        ranks: Dict[int, float] = {}
+
+        kind_clause = ""
+        kind_params: List[str] = []
+        if kinds:
+            placeholders = ",".join("?" for _ in kinds)
+            kind_clause = f" AND m.kind IN ({placeholders})"
+            kind_params = list(kinds)
+
+        if self.fts and query:
+            tokens = re.findall(r"\w+", query, re.UNICODE)
+            if tokens:
+                fts_query = " OR ".join(f'"{token}"' for token in tokens)
+                sql = (
+                    "SELECT m.*, bm25(memories_fts) AS rank FROM memories_fts "
+                    "JOIN memories m ON m.id = memories_fts.rowid "
+                    f"WHERE memories_fts MATCH ?{kind_clause} ORDER BY rank LIMIT ?"
+                )
+                with self._connect() as conn:
+                    rows = conn.execute(
+                        sql, [fts_query, *kind_params, max(limit * 4, 20)]
+                    ).fetchall()
+                for row in rows:
+                    ranks[int(row["id"])] = -float(row["rank"])
+
+        if not rows:
+            sql = f"SELECT m.*, NULL AS rank FROM memories m WHERE 1=1{kind_clause} ORDER BY importance DESC, created_at DESC LIMIT ?"
+            with self._connect() as conn:
+                rows = conn.execute(sql, [*kind_params, max(limit * 4, 20)]).fetchall()
+
+        if not rows:
+            return []
+
+        lexical_values = list(ranks.values())
+        lex_min = min(lexical_values) if lexical_values else 0.0
+        lex_max = max(lexical_values) if lexical_values else 0.0
+        hits: List[MemoryHit] = []
+        for row in rows:
+            hit = self._to_hit(row)
+            memory_id = hit.id
+            if ranks and lex_max > lex_min:
+                hit.lexical = (ranks.get(memory_id, lex_min) - lex_min) / (lex_max - lex_min)
+            elif ranks:
+                hit.lexical = 1.0 if memory_id in ranks else 0.0
+            age = max(0.0, now - hit.created_at)
+            half_life = KIND_HALF_LIFE_DAYS.get(hit.kind, 30) * 86400
+            hit.recency = recency_score(age, half_life)
+            embedding = HashingEmbedder.from_bytes(row["embedding"] or b"", self.embedder.dim)
+            hit.semantic = max(0.0, cosine(query_embedding, embedding))
+            hit.score = (
+                self.weights["lexical"] * hit.lexical
+                + self.weights["recency"] * hit.recency
+                + self.weights["importance"] * hit.importance
+                + self.weights["semantic"] * hit.semantic
+            )
+            hits.append(hit)
+
+        hits.sort(key=lambda item: item.score, reverse=True)
+        hits = [hit for hit in hits if hit.score >= min_score][:limit]
+        if hits:
+            with self._connect() as conn:
+                conn.executemany(
+                    "UPDATE memories SET last_accessed=?, access_count=access_count+1 WHERE id=?",
+                    [(now, hit.id) for hit in hits],
+                )
+        return hits
+
+    def recent(self, kind: Optional[str] = None, limit: int = 10) -> List[MemoryHit]:
+        sql = "SELECT * FROM memories"
+        params: List[object] = []
+        if kind:
+            sql += " WHERE kind=?"
+            params.append(kind)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [self._to_hit(row) for row in rows]
+
+    def recent_events(self, session_id: str, limit: int = 20) -> List[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT role, content, created_at FROM events WHERE session_id=? ORDER BY id DESC LIMIT ?",
                 (session_id, limit),
             ).fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT * FROM initiatives ORDER BY created_at DESC LIMIT ?", (limit,)
+        return [
+            {"role": row["role"], "content": row["content"], "created_at": row["created_at"]}
+            for row in reversed(rows)
+        ]
+
+    def sessions(self, limit: int = 20) -> List[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT session_id, COUNT(*) AS turns, MAX(created_at) AS last_at
+                   FROM events GROUP BY session_id ORDER BY last_at DESC LIMIT ?""",
+                (limit,),
             ).fetchall()
-        return [dict(r) for r in rows][::-1]
+        return [dict(row) for row in rows]
 
-    def count_initiatives_since(self, since_ts: float, session_id: str | None = None) -> int:
-        if session_id:
-            row = self._conn.execute(
-                "SELECT COUNT(*) AS c FROM initiatives WHERE created_at>=? AND session_id=? AND delivered=1",
-                (since_ts, session_id),
-            ).fetchone()
-        else:
-            row = self._conn.execute(
-                "SELECT COUNT(*) AS c FROM initiatives WHERE created_at>=? AND delivered=1", (since_ts,)
-            ).fetchone()
-        return int(row["c"])
-
-    # ---------------------------------------------------------------- consolidation
-    def summarize_session(self, session_id: str, max_items: int = 6) -> str:
-        """Extractive summary: the most important, least redundant turns."""
-        eps = self.recent_episodes(session_id, limit=200)
-        if not eps:
-            return ""
-        scored: list[tuple[float, Episode]] = []
-        seen_terms: Counter = Counter()
-        for ep in eps:
-            terms = set(tokenize(ep.content))
-            if not terms:
-                continue
-            novelty = 1.0 - (len(terms & set(seen_terms)) / len(terms))
-            score = ep.importance * (0.3 + novelty) * math.log1p(len(terms))
-            scored.append((score, ep))
-            seen_terms.update(terms)
-        scored.sort(key=lambda pair: pair[0], reverse=True)
-        chosen = sorted(scored[:max_items], key=lambda pair: pair[1].ts)
-        return "\n".join(f"{ep.role}: {ep.content[:240]}" for _, ep in chosen)
-
-    def consolidate(self, min_mentions: int = 3) -> list[Fact]:
-        """Promote repeated episodic statements into semantic facts.
-
-        A statement is only consolidated when the same normalised sentence
-        appears at least ``min_mentions`` times. No model is involved.
-        """
-        rows = self._conn.execute("SELECT role, content FROM episodes").fetchall()
-        counts: Counter = Counter()
+    def reasoning_runs(self, limit: int = 50) -> List[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM reasoning_runs ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        runs = []
         for row in rows:
-            for sentence in re.split(r"(?<=[.!?])\s+", row["content"]):
-                norm = " ".join(tokenize(sentence))
-                if len(norm.split()) >= 4:
-                    counts[norm] += 1
-        promoted: list[Fact] = []
-        for norm, count in counts.items():
-            if count >= min_mentions:
-                fact_id = self.add_fact(
-                    subject="consolidated", content=norm, source="episodic-consolidation", confidence=min(0.9, 0.4 + 0.1 * count)
-                )
-                promoted.append(
-                    Fact(id=fact_id, subject="consolidated", content=norm, source="episodic-consolidation",
-                         confidence=min(0.9, 0.4 + 0.1 * count), ts=time.time())
-                )
-        return promoted
+            payload = json.loads(row["payload"] or "{}")
+            payload.setdefault("created_at", row["created_at"])
+            runs.append(payload)
+        return runs
+
+    def working_memory(
+        self, session_id: str, limit: int = 12, ttl_minutes: int = 120
+    ) -> List[dict]:
+        cutoff = time.time() - ttl_minutes * 60
+        events = [event for event in self.recent_events(session_id, limit=limit) if event["created_at"] >= cutoff]
+        return events
 
     def stats(self) -> dict:
-        episodes = self._conn.execute("SELECT COUNT(*) AS c FROM episodes").fetchone()["c"]
-        facts = self._conn.execute("SELECT COUNT(*) AS c FROM facts").fetchone()["c"]
-        prefs = self._conn.execute("SELECT COUNT(*) AS c FROM preferences").fetchone()["c"]
-        projects = self._conn.execute("SELECT COUNT(*) AS c FROM projects").fetchone()["c"]
-        by_role = {
-            r["role"]: r["c"]
-            for r in self._conn.execute("SELECT role, COUNT(*) AS c FROM episodes GROUP BY role").fetchall()
-        }
+        with self._connect() as conn:
+            total = conn.execute("SELECT COUNT(*) AS c FROM memories").fetchone()["c"]
+            by_kind = {
+                row["kind"]: row["c"]
+                for row in conn.execute(
+                    "SELECT kind, COUNT(*) AS c FROM memories GROUP BY kind"
+                ).fetchall()
+            }
+            events = conn.execute("SELECT COUNT(*) AS c FROM events").fetchone()["c"]
+            reasoning = conn.execute("SELECT COUNT(*) AS c FROM reasoning_runs").fetchone()["c"]
+            initiatives = conn.execute("SELECT COUNT(*) AS c FROM initiatives").fetchone()["c"]
         return {
-            "episodes": episodes,
-            "facts": facts,
-            "preferences": prefs,
-            "projects": projects,
-            "episodes_by_role": by_role,
-            "working_memory_items": len(self.working),
-            "working_memory_tokens": self.working.tokens,
-            "initiatives": self._conn.execute("SELECT COUNT(*) AS c FROM initiatives").fetchone()["c"],
+            "memories": total,
+            "by_kind": by_kind,
+            "events": events,
+            "reasoning_runs": reasoning,
+            "initiatives": initiatives,
+            "fts": self.fts,
         }
 
-    def close(self) -> None:
-        self._conn.close()
+    # ------------------------------------------------------------- maintenance
+    def consolidate(
+        self,
+        session_id: Optional[str] = None,
+        min_events: int = 8,
+        max_events: int = 200,
+    ) -> dict:
+        key = f"last_consolidation:{session_id or 'global'}"
+        last = float(self.kv_get(key, "0") or 0)
+        with self._connect() as conn:
+            if session_id:
+                rows = conn.execute(
+                    "SELECT role, content, created_at FROM events WHERE session_id=? AND created_at>? ORDER BY id LIMIT ?",
+                    (session_id, last, max_events),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT role, content, created_at FROM events WHERE created_at>? ORDER BY id LIMIT ?",
+                    (last, max_events),
+                ).fetchall()
+        if len(rows) < min_events:
+            return {"consolidated": 0, "events": len(rows), "reason": "not enough new events"}
+
+        texts = [row["content"] for row in rows if row["role"] == "user"]
+        summary = extractive_summary(texts)
+        created = 0
+        if summary:
+            self.add(
+                content=summary,
+                kind="semantic",
+                importance=0.75,
+                source="consolidation",
+                session_id=session_id,
+                meta={"method": "extractive", "events": len(rows)},
+            )
+            created += 1
+        preferences = extract_preferences(texts)
+        for preference in dedupe_texts(preferences):
+            self.add(
+                content=preference,
+                kind="preference",
+                importance=0.9,
+                source="consolidation",
+                session_id=session_id,
+                meta={"method": "pattern"},
+            )
+            created += 1
+        latest = max(row["created_at"] for row in rows)
+        self.kv_set(key, str(latest))
+        return {"consolidated": created, "events": len(rows), "summary": summary[:300]}
+
+    def prune_working(self, ttl_minutes: int = 120) -> int:
+        cutoff = time.time() - ttl_minutes * 60
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM memories WHERE kind='working' AND created_at<?", (cutoff,)
+            )
+            return cursor.rowcount
+
+    # ---------------------------------------------------------------- helpers
+    def _to_hit(self, row: sqlite3.Row) -> MemoryHit:
+        return MemoryHit(
+            id=int(row["id"]),
+            kind=row["kind"],
+            content=row["content"],
+            summary=row["summary"],
+            importance=float(row["importance"]),
+            created_at=float(row["created_at"]),
+        )
+
+    @staticmethod
+    def _make_summary(content: str) -> str:
+        first = re.split(r"(?<=[.!?])\s+", content.strip(), maxsplit=1)[0]
+        return (first or content)[:240]
+
+    @staticmethod
+    def _estimate_importance(content: str, kind: str) -> float:
+        score = 0.5
+        if kind in {"preference", "project"}:
+            score += 0.2
+        if len(content) > 200:
+            score += 0.1
+        if PREFERENCE_HINTS.search(content):
+            score += 0.2
+        return max(0.0, min(1.0, score))

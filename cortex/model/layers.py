@@ -1,12 +1,6 @@
-"""Building blocks of the CORTEX-0 Transformer.
-
-Implemented from scratch: RMSNorm, rotary position embeddings, grouped-query
-causal self-attention and a SwiGLU feed-forward network.
-"""
+"""Building blocks: RMSNorm, SwiGLU feed-forward, rotary position embeddings."""
 
 from __future__ import annotations
-
-import math
 
 import torch
 import torch.nn.functional as F
@@ -14,152 +8,98 @@ from torch import nn
 
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-5) -> None:
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
+    """Root mean square layer normalisation (Zhang & Sennrich, 2019).
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        dtype = x.dtype
-        x = x.float()
-        x = x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        return (x.to(dtype)) * self.weight
-
-
-def precompute_rope(head_dim: int, max_seq_len: int, theta: float = 10_000.0) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return cos/sin tables of shape (max_seq_len, head_dim // 2)."""
-    if head_dim % 2 != 0:
-        raise ValueError("RoPE requires an even head dimension")
-    inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
-    positions = torch.arange(max_seq_len, dtype=torch.float32)
-    freqs = torch.outer(positions, inv_freq)
-    return freqs.cos(), freqs.sin()
-
-
-def rotate_half(x: torch.Tensor) -> torch.Tensor:
-    half = x.shape[-1] // 2
-    return torch.cat((-x[..., half:], x[..., :half]), dim=-1)
-
-
-def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    """Apply rotary embeddings to ``x`` of shape (B, H, T, D).
-
-    ``cos``/``sin`` have shape (T, D // 2) and are broadcast over batch/heads.
+    The normalisation is computed in float32 for numerical stability, then cast
+    back to the input dtype, matching the reference Llama implementation.
     """
-    # Duplicate each frequency so cos/sin line up with the interleaved halves.
-    cos = torch.cat((cos, cos), dim=-1)[None, None, :, :]
-    sin = torch.cat((sin, sin), dim=-1)[None, None, :, :]
-    return (x * cos) + (rotate_half(x) * sin)
 
-
-class Attention(nn.Module):
-    """Causal grouped-query attention with optional incremental KV cache."""
-
-    def __init__(
-        self,
-        d_model: int,
-        n_heads: int,
-        n_kv_heads: int,
-        max_seq_len: int,
-        rope_theta: float = 10_000.0,
-        dropout: float = 0.0,
-        bias: bool = False,
-    ) -> None:
+    def __init__(self, hidden_size: int, eps: float = 1e-5) -> None:
         super().__init__()
-        if d_model % n_heads or n_heads % n_kv_heads:
-            raise ValueError("invalid head configuration")
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.n_kv_heads = n_kv_heads
-        self.head_dim = d_model // n_heads
-        self.dropout = dropout
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.eps = eps
 
-        self.q_proj = nn.Linear(d_model, n_heads * self.head_dim, bias=bias)
-        self.k_proj = nn.Linear(d_model, n_kv_heads * self.head_dim, bias=bias)
-        self.v_proj = nn.Linear(d_model, n_kv_heads * self.head_dim, bias=bias)
-        self.o_proj = nn.Linear(n_heads * self.head_dim, d_model, bias=bias)
-        self.o_proj._cortex_residual = True  # type: ignore[attr-defined]
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        input_dtype = hidden_states.dtype
+        x = hidden_states.float()
+        x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return self.weight * x.to(input_dtype)
 
-        cos, sin = precompute_rope(self.head_dim, max_seq_len, rope_theta)
-        self.register_buffer("rope_cos", cos, persistent=False)
-        self.register_buffer("rope_sin", sin, persistent=False)
-
-    def _shape(self, x: torch.Tensor, n_heads: int) -> torch.Tensor:
-        b, t, _ = x.shape
-        return x.view(b, t, n_heads, self.head_dim).transpose(1, 2)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        past_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
-        use_cache: bool = False,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
-        b, t, _ = x.shape
-        past_len = 0 if past_kv is None else past_kv[0].shape[2]
-
-        q = self._shape(self.q_proj(x), self.n_heads)
-        k = self._shape(self.k_proj(x), self.n_kv_heads)
-        v = self._shape(self.v_proj(x), self.n_kv_heads)
-
-        cos = self.rope_cos[past_len : past_len + t]
-        sin = self.rope_sin[past_len : past_len + t]
-        q = apply_rope(q, cos, sin)
-        k = apply_rope(k, cos, sin)
-
-        if past_kv is not None:
-            k = torch.cat((past_kv[0], k), dim=2)
-            v = torch.cat((past_kv[1], v), dim=2)
-        present = (k, v) if use_cache else None
-
-        # Expand KV heads to query heads (grouped-query attention).
-        if self.n_kv_heads != self.n_heads:
-            rep = self.n_heads // self.n_kv_heads
-            k = k.repeat_interleave(rep, dim=1)
-            v = v.repeat_interleave(rep, dim=1)
-
-        attn_mask = None
-        is_causal = past_kv is None
-        if past_kv is not None and t > 1:
-            kv_len = past_len + t
-            mask = torch.ones(t, kv_len, dtype=torch.bool, device=x.device).tril(diagonal=past_len)
-            attn_mask = mask
-
-        out = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=attn_mask,
-            dropout_p=self.dropout if self.training else 0.0,
-            is_causal=is_causal,
-        )
-        out = out.transpose(1, 2).contiguous().view(b, t, self.d_model)
-        return self.o_proj(out), present
+    def extra_repr(self) -> str:
+        return f"{tuple(self.weight.shape)}, eps={self.eps}"
 
 
 class SwiGLU(nn.Module):
-    def __init__(self, d_model: int, hidden: int, bias: bool = False) -> None:
+    """Gated linear unit with SiLU activation, as used by Llama."""
+
+    def __init__(self, hidden_size: int, intermediate_size: int, hidden_act: str = "silu") -> None:
         super().__init__()
-        self.gate_proj = nn.Linear(d_model, hidden, bias=bias)
-        self.up_proj = nn.Linear(d_model, hidden, bias=bias)
-        self.down_proj = nn.Linear(hidden, d_model, bias=bias)
-        self.down_proj._cortex_residual = True  # type: ignore[attr-defined]
+        if hidden_act not in {"silu", "gelu"}:
+            raise ValueError(f"unsupported hidden_act: {hidden_act}")
+        self.hidden_act = hidden_act
+        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
+
+    def _act(self, x: torch.Tensor) -> torch.Tensor:
+        return F.silu(x) if self.hidden_act == "silu" else F.gelu(x)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+        return self.down_proj(self._act(self.gate_proj(x)) * self.up_proj(x))
 
 
-def scaled_init(module: nn.Module, std: float, residual_depth: int | None = None) -> None:
-    """Normal-initialise linear weights, optionally shrinking residual outputs."""
-    for child in module.modules():
-        if isinstance(child, nn.Linear):
-            nn.init.normal_(child.weight, mean=0.0, std=std)
-            if child.bias is not None:
-                nn.init.zeros_(child.bias)
-    if residual_depth:
-        # GPT-2 style scaling of output projections that write into residuals.
-        scale = 1.0 / math.sqrt(2 * residual_depth)
-        for name in ("o_proj", "down_proj"):
-            for child in module.modules():
-                if isinstance(child, nn.Linear) and getattr(child, "_cortex_residual", False):
-                    with torch.no_grad():
-                        child.weight.mul_(scale)
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """Rotate the last dimension: [x1, x2] -> [-x2, x1]."""
+    half = x.shape[-1] // 2
+    x1, x2 = x[..., :half], x[..., half:]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_rotary_pos_emb(
+    tensor: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+) -> torch.Tensor:
+    """Apply RoPE to a ``[batch, heads, seq, head_dim]`` tensor.
+
+    ``cos``/``sin`` have shape ``[batch, 1, seq, head_dim]``.  The computation is
+    done in float32 and cast back, which keeps long-context training stable.
+    """
+    dtype = tensor.dtype
+    t = tensor.float()
+    return (t * cos + rotate_half(t) * sin).to(dtype)
+
+
+class RotaryEmbedding(nn.Module):
+    """Precomputed cos/sin tables with dynamic extension beyond max length."""
+
+    def __init__(self, dim: int, max_position_embeddings: int = 2048, base: float = 10000.0):
+        super().__init__()
+        if dim % 2 != 0:
+            raise ValueError("rotary dimension must be even")
+        self.dim = dim
+        self.base = base
+        self.max_position_embeddings = max_position_embeddings
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.register_buffer("cos_cached", torch.empty(0), persistent=False)
+        self.register_buffer("sin_cached", torch.empty(0), persistent=False)
+        self._set_cos_sin_cache(max_position_embeddings, inv_freq.device, torch.float32)
+
+    def _set_cos_sin_cache(self, seq_len: int, device: torch.device, dtype: torch.dtype) -> None:
+        self.max_seq_len_cached = seq_len
+        t = torch.arange(seq_len, device=device, dtype=torch.float32)
+        freqs = torch.outer(t, self.inv_freq.to(device=device))
+        emb = torch.cat((freqs, freqs), dim=-1)
+        self.cos_cached = emb.cos().to(dtype)
+        self.sin_cached = emb.sin().to(dtype)
+
+    def forward(
+        self, x: torch.Tensor, position_ids: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        max_pos = int(position_ids.max().item()) + 1 if position_ids.numel() else 0
+        if max_pos > self.max_seq_len_cached or self.cos_cached.device != x.device:
+            self._set_cos_sin_cache(
+                max(max_pos, self.max_position_embeddings), x.device, self.cos_cached.dtype
+            )
+        cos = self.cos_cached[position_ids].unsqueeze(1)
+        sin = self.sin_cached[position_ids].unsqueeze(1)
+        return cos, sin

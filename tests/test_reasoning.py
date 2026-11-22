@@ -1,84 +1,74 @@
 from __future__ import annotations
 
-import pytest
+import torch
 
-from cortex.evaluation.reasoning_eval import make_problems, score_answer
-from cortex.generation.sampler import GenerationConfig
-from cortex.reasoning.engine import ReasoningEngine
-from cortex.reasoning.verifiers import (
-    ArithmeticVerifier,
-    SelfConsistencyVerifier,
-    extract_answer,
-    majority_answer,
-    normalize_answer,
-    safe_eval,
-)
+from cortex.evaluation.reasoning import extract_answer, normalize_answer
+from cortex.reasoning.engine import ReasoningConfig, ReasoningEngine
+from cortex.reasoning.grpo import group_advantages, grpo_loss, sequence_logprobs
+from cortex.reasoning.verifier import ArithmeticVerifier, check_equations, safe_arithmetic
 
 
-def test_safe_eval():
-    assert safe_eval("2 + 3 * 4") == 14
-    assert safe_eval("(2 + 3) * 4") == 20
-    assert safe_eval("2 ^ 5") == 32
-    assert safe_eval("__import__('os')") is None
-    assert safe_eval("1 / 0") is None
-
-
-def test_extract_answer():
-    assert extract_answer("so the answer is 42") == "42"
-    assert extract_answer("Reasoning...\nAnswer: 17") == "17"
-    assert extract_answer("Réponse : 9") == "9"
-    assert extract_answer("no number here") is None
-
-
-def test_majority_and_normalisation():
-    assert normalize_answer(" 42.0 ") == "42"
-    assert majority_answer(["7", "7.0", "8", None]) == "7"
+def test_safe_arithmetic_and_equations():
+    assert safe_arithmetic("2 + 3 * 4") == 14
+    assert safe_arithmetic("(10 - 2) / 4") == 2
+    checks = check_equations("2 + 2 = 4 et 3 * 3 = 10")
+    assert checks[0][1] is True
+    assert checks[1][1] is False
 
 
 def test_arithmetic_verifier():
-    v = ArithmeticVerifier()
-    assert v.check("What is 12 + 7?", "12 + 7 = 19\nAnswer: 19").ok is True
-    assert v.check("What is 12 + 7?", "12 + 7 = 20\nAnswer: 20").ok is False
-    assert v.check("What is 12 + 7?", "I do not know").ok is None
-    assert v.check("Tell me a story", "Answer: 3").ok is None
+    verifier = ArithmeticVerifier()
+    assert verifier.verify("Réponse : 42", expected="42").verified
+    assert not verifier.verify("Réponse : 41", expected="42").verified
+    assert not verifier.verify("aucune réponse", expected="42").verified
 
 
-def test_self_consistency_verifier():
-    v = SelfConsistencyVerifier(["5", "5", "6"])
-    assert v.check("q", "Answer: 5").ok is True
-    assert v.check("q", "Answer: 6").ok is False
+def test_answer_normalization():
+    assert normalize_answer("42.0") == "42"
+    assert normalize_answer("oui") == "oui"
+    assert extract_answer("Raisonnement... Réponse : 17") == "17"
 
 
-def test_reasoning_engine_structure(tiny_model, tiny_tokenizer):
-    engine = ReasoningEngine(tiny_model, tiny_tokenizer)
-    gen = GenerationConfig(max_new_tokens=8, temperature=0.0, seed=1)
-    result = engine.solve("What is 2 + 3?", strategy="direct", gen=gen)
-    assert result.strategy == "direct"
-    assert len(result.candidates) == 1
-    payload = result.as_dict()
-    assert payload["problem"] == "What is 2 + 3?"
+def test_group_advantages_are_normalised():
+    rewards = torch.tensor([1.0, 0.0, 1.0, 0.0])
+    advantages = group_advantages(rewards, group_size=2)
+    assert advantages.shape == rewards.shape
+    assert abs(float(advantages[:2].mean())) < 1e-5
+    assert float(advantages[0]) > 0 > float(advantages[1])
 
 
-def test_reasoning_engine_multi_sample(tiny_model, tiny_tokenizer):
-    engine = ReasoningEngine(tiny_model, tiny_tokenizer)
-    gen = GenerationConfig(max_new_tokens=6, temperature=0.0, seed=1)
-    result = engine.solve("What is 4 + 5?", strategy="self_consistency", n_samples=2, gen=gen, reflect=False)
-    assert len(result.candidates) == 2
-    assert 0.0 <= result.agreement <= 1.0
+def test_grpo_loss_with_identical_policy():
+    logprobs = torch.zeros(4, 5)
+    old = torch.zeros(4, 5)
+    rewards = torch.tensor([1.0, 0.0, 1.0, 0.0])
+    mask = torch.ones(4, 5)
+    result = grpo_loss(logprobs, old, rewards, group_size=2, mask=mask)
+    assert torch.isfinite(result["loss"])
+    assert float(result["mean_ratio"]) == 1.0
+    assert float(result["clip_fraction"]) == 0.0
 
 
-def test_reasoning_engine_rejects_unknown_strategy(tiny_model, tiny_tokenizer):
-    engine = ReasoningEngine(tiny_model, tiny_tokenizer)
-    with pytest.raises(ValueError):
-        engine.solve("2+2", strategy="magic")
+def test_sequence_logprobs_masks_prompt(tiny_model):
+    ids = torch.randint(0, tiny_model.config.vocab_size, (2, 8))
+    mask = torch.zeros_like(ids)
+    mask[:, 4:] = 1
+    logprobs = sequence_logprobs(tiny_model, ids, mask)
+    assert logprobs.shape == (2, 7)
+    assert torch.all(logprobs[:, :3] == 0)
+    assert torch.isfinite(logprobs[:, 3:]).all()
 
 
-def test_problem_generation_and_scoring():
-    problems = make_problems(10, seed=1)
-    assert len(problems) == 10
-    for p in problems:
-        assert p.answer.lstrip("-").isdigit()
-    assert score_answer("19", "19")
-    assert score_answer("The answer is 19.", "19")
-    assert not score_answer("20", "19")
-    assert not score_answer(None, "19")
+def test_reasoning_engine_records_runs(tiny_model, tokenizer, store):
+    engine = ReasoningEngine(
+        tiny_model,
+        tokenizer,
+        ReasoningConfig(num_samples=2, max_new_tokens=8, temperature=0.8, seed=0),
+        store=store,
+    )
+    result = engine.solve("Combien font 2 + 2 ?", expected="4")
+    assert len(result.candidates) >= 2
+    assert isinstance(result.verified, bool)
+    assert isinstance(result.answer, str)
+    runs = store.reasoning_runs(limit=5)
+    assert len(runs) == 1
+    assert runs[0]["question"].startswith("Combien")

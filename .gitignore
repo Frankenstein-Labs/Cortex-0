@@ -1,30 +1,29 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-.eggs/
+.venv/
 build/
 dist/
-.venv/
-venv/
-.env
 .pytest_cache/
 .ruff_cache/
-.mypy_cache/
 .ipynb_checkpoints/
 
-# Generated data and weights are reproducible, not source
-data/raw/
-data/processed/*.bin
-checkpoints/
-artifacts/*.db
-artifacts/*.db-*
-artifacts/tasks/
-artifacts/coding_report.json
-runs/
-wandb/
+# Model artifacts are versioned on Hugging Face, not in git.
+checkpoints/*
+!checkpoints/.gitkeep
+datasets/raw/
+datasets/processed/*
+!datasets/processed/manifest.json
+experiments/runs/
+*.bin
+*.pt
+*.safetensors
 *.log
 
-# Agent workspace memory
+.env
+*.sqlite
+*.db
+
+# Internal agent memory and exported weights
 .openhands/
-data/processed/tokenizer.json
-data/processed/tokenizer.meta.json
+export/

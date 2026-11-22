@@ -1,94 +1,82 @@
-"""Small, explicit tool registry used by agents and the API."""
+"""Typed tool registry used by the coding agent and the API."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Callable
+import inspect
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional
 
-from cortex.reasoning.verifiers import safe_eval
+
+class ToolError(RuntimeError):
+    pass
 
 
 @dataclass
 class Tool:
     name: str
     description: str
-    parameters: dict[str, str]
-    func: Callable[..., Any]
-    requires_approval: bool = False
+    handler: Callable[..., Any]
+    parameters: Dict[str, str] = field(default_factory=dict)
+    dangerous: bool = False
 
-    def as_dict(self) -> dict:
+    def to_dict(self) -> dict:
         return {
             "name": self.name,
             "description": self.description,
             "parameters": self.parameters,
-            "requires_approval": self.requires_approval,
+            "dangerous": self.dangerous,
         }
 
 
 class ToolRegistry:
     def __init__(self) -> None:
-        self._tools: dict[str, Tool] = {}
+        self._tools: Dict[str, Tool] = {}
 
-    def register(self, tool: Tool) -> None:
+    def register(
+        self,
+        name: str,
+        description: str,
+        parameters: Optional[Dict[str, str]] = None,
+        dangerous: bool = False,
+    ):
+        def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
+            if name in self._tools:
+                raise ValueError(f"tool already registered: {name}")
+            self._tools[name] = Tool(
+                name=name,
+                description=description,
+                handler=handler,
+                parameters=parameters or {},
+                dangerous=dangerous,
+            )
+            return handler
+
+        return decorator
+
+    def add(self, tool: Tool) -> None:
         if tool.name in self._tools:
-            raise ValueError(f"tool {tool.name!r} already registered")
+            raise ValueError(f"tool already registered: {tool.name}")
         self._tools[tool.name] = tool
 
     def get(self, name: str) -> Tool:
         if name not in self._tools:
-            raise KeyError(f"unknown tool {name!r}")
+            raise ToolError(f"unknown tool: {name!r}")
         return self._tools[name]
 
-    def list(self) -> list[dict]:
-        return [t.as_dict() for t in self._tools.values()]
+    def list(self) -> List[dict]:
+        return [tool.to_dict() for tool in self._tools.values()]
 
-    def call(self, name: str, **kwargs: Any) -> Any:
-        return self.get(name).func(**kwargs)
-
-
-def default_registry(memory=None) -> ToolRegistry:
-    reg = ToolRegistry()
-
-    def calculator(expression: str) -> dict:
-        value = safe_eval(expression)
-        if value is None:
-            return {"ok": False, "error": "invalid or unsafe expression"}
-        return {"ok": True, "value": value}
-
-    reg.register(
-        Tool(
-            "calculator",
-            "Evaluate a basic arithmetic expression (+, -, *, /, ^).",
-            {"expression": "string"},
-            calculator,
-        )
-    )
-
-    if memory is not None:
-
-        def memory_search(query: str, limit: int = 5) -> dict:
-            eps = memory.search_episodes(query, limit=limit)
-            return {"ok": True, "results": [e.as_dict() for e in eps]}
-
-        def memory_write(subject: str, content: str) -> dict:
-            fact_id = memory.add_fact(subject, content, source="tool")
-            return {"ok": True, "fact_id": fact_id}
-
-        reg.register(
-            Tool(
-                "memory_search",
-                "Search episodic memory.",
-                {"query": "string", "limit": "integer"},
-                memory_search,
-            )
-        )
-        reg.register(
-            Tool(
-                "memory_write",
-                "Store a semantic fact.",
-                {"subject": "string", "content": "string"},
-                memory_write,
-            )
-        )
-
-    return reg
+    def execute(self, name: str, arguments: Optional[Dict[str, Any]] = None) -> Any:
+        tool = self.get(name)
+        arguments = arguments or {}
+        signature = inspect.signature(tool.handler)
+        accepted = set(signature.parameters)
+        unknown = set(arguments) - accepted
+        if unknown:
+            raise ToolError(f"unexpected arguments for {name}: {sorted(unknown)}")
+        try:
+            return tool.handler(**arguments)
+        except ToolError:
+            raise
+        except Exception as exc:
+            raise ToolError(f"{name} failed: {type(exc).__name__}: {exc}") from exc

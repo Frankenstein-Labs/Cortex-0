@@ -1,140 +1,292 @@
 # CORTEX-0
 
-**Small autonomous language model — Frankenstein-Labs**
+**Small Autonomous Language Model — Frankenstein-Labs**
 
-CORTEX-0 is a decoder-only Transformer written from scratch in PyTorch, trained with next-token
-prediction, and surrounded by a real software stack for memory, reasoning, initiative, persistent
-missions and confined code execution.
+CORTEX-0 est une petite LLM construite **de zéro** : architecture Transformer
+décodeur, tokenizer BPE, pipeline de préentraînement, évaluation, raisonnement
+vérifié, mémoire persistante, moteur d'initiative et agent de codage. Le code
+est réel, testé et exécutable sur CPU. Les poids sont exportables au format
+Hugging Face `LlamaForCausalLM`.
 
-It is **not** a wrapper around an external API and it does **not** pretend to be a general
-assistant. The released CPU checkpoint is small (3.15M parameters); its measured quality is
-reported honestly in [`docs/RESULTS.md`](docs/RESULTS.md).
+> CORTEX-0 est un projet de recherche précoce, pas un assistant généraliste.
+> Le modèle entraîné dans ce dépôt fait ~2,56 M de paramètres, sur un corpus de
+> 5,9 M de tokens (12,3 M de tokens vus, ~2 époques). Il produit du texte court,
+> souvent imparfait. Toutes les métriques publiées ici sont mesurées, jamais simulées.
 
-```
-cortex/
-├── model/        RMSNorm, RoPE, grouped-query attention, SwiGLU, LM
-├── tokenizer/    byte-level BPE training and chat template
-├── training/     pretraining loop, memory-mapped data, SFT
-├── generation/   temperature, top-k, top-p, repetition penalty
-├── evaluation/   perplexity, reasoning benchmark, mechanism suite
-├── reasoning/    multi-sample traces, voting, deterministic verification
-├── memory/       working, episodic, semantic, preference, project memory
-├── conversation/ proactive companion
-├── initiative/   gated autonomous proposals
-├── planning/     persistent tasks, resumable plans, checkpoints
-├── coding/       confined software-engineering agent
-├── execution/    process-level sandbox
-├── tools/        explicit tool registry
-└── api/          FastAPI service
-```
+---
 
-## Status
+## État vérifié
 
-| Item | Value |
+| Élément | État |
 | --- | --- |
-| Architecture | decoder-only Transformer, RoPE, RMSNorm, GQA, SwiGLU, tied embeddings |
-| Tokenizer | byte-level BPE, 8,192 tokens, trained on the corpus |
-| CPU checkpoint | 3.15M parameters, 19.7M training tokens |
-| Validation metrics | see [`docs/RESULTS.md`](docs/RESULTS.md) |
-| Tests | `python -m pytest tests/ -q` |
-| Mechanism suite | `python -m cortex.evaluation.suite` |
-| Instruction tuning | short SFT run; the base model is not a chat assistant |
-| Hugging Face weights | blocked: no `HF_TOKEN` in the build environment |
+| Architecture Llama-compatible | ✅ testée (causalité, KV-cache, GQA, RoPE) |
+| Tokenizer BPE 4096 | ✅ entraîné, aller-retour octet-exact |
+| Préentraînement CPU | ✅ 3 000 steps, ~5 700 tokens/s |
+| Export Hugging Face | ✅ logits identiques (`max_logit_diff = 0.0`) |
+| Tests automatisés | ✅ 89 tests (`pytest -q`) |
+| Perplexité validation | ✅ 37,44 (loss 3,623) |
+| Mémoire SQLite + FTS5 | ✅ stockage, recherche, consolidation |
+| Raisonnement + vérificateur | ✅ best-of-N, révision, GRPO |
+| Initiative proactive | ✅ policy, scheduler, déduplication |
+| Agent de codage | ✅ sandbox, approbations, missions persistantes |
+| API FastAPI | ✅ chat, streaming SSE, mémoire, missions |
+| Publication Hugging Face | ⛔ bloquée : aucun token `HF_TOKEN` disponible |
 
-## Quickstart
+---
+
+## Démarrage rapide
 
 ```bash
-python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-python -m pip install -e ".[dev,serve]"
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev,train]"
 
-# 1. Data (TinyStories, CDLA-Sharing-1.0)
-mkdir -p data/raw
-curl -sL https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/data/train-00000-of-00004-2d5a1467fff1081b.parquet -o data/raw/tinystories_train.parquet
-curl -sL https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/data/validation-00000-of-00001-869c898b519ad725.parquet -o data/raw/tinystories_valid.parquet
-python scripts/prepare_data.py
+# 1. Construire le tokenizer et les fichiers de tokens
+python scripts/prepare_data.py --config configs/tiny-cpu.yaml
 
-# 2. Train the CPU-sized model
-python scripts/train.py --config configs/cortex-0-nano.json
+# 2. Préentraîner (CPU, ~15 min pour 3 000 steps)
+python scripts/train.py --config configs/tiny-cpu.yaml
 
-# 3. Evaluate and sample
-python -m cortex.cli --checkpoint checkpoints/cortex-0-nano/best.safetensors eval
-python scripts/generate.py --prompt "Once upon a time" --samples 3
+# 3. Évaluer
+python scripts/evaluate.py --model-dir checkpoints/tiny-cpu \
+  --val-data datasets/processed/val.bin --n 20
 
-# 4. Run the API
-python -m cortex.cli serve --port 8000
+# 4. Générer
+python scripts/generate.py --model-dir checkpoints/tiny-cpu \
+  --prompt "CORTEX est" --max-new-tokens 60
+
+# 5. Discuter
+python scripts/serve.py --model-dir checkpoints/tiny-cpu --port 8000
+# puis http://127.0.0.1:8000/docs
 ```
 
-## Model presets
+CLI unifiée :
 
-| Preset | Parameters | Context | Intended hardware |
-| --- | ---: | ---: | --- |
-| `cortex-0-nano` | 3.15M | 512 | CPU, this repository's measured run |
-| `cortex-0-mini` | 6.3M | 512 | CPU (slow) or small GPU |
-| `cortex-0-small` | 26.7M | 1024 | GPU (Colab T4) |
-| `cortex-0-base` | 81.8M | 2048 | GPU |
+```bash
+cortex train --config configs/tiny-cpu.yaml
+cortex chat --model-dir checkpoints/tiny-cpu
+cortex serve --model-dir checkpoints/tiny-cpu --scheduler
+cortex evaluate --model-dir checkpoints/tiny-cpu
+cortex export-hf --model-dir checkpoints/tiny-cpu --out export/Cortex-0 --verify
+```
 
-GPU instructions: [`notebooks/CORTEX_0_TRAIN_GPU.ipynb`](notebooks/CORTEX_0_TRAIN_GPU.ipynb).
-The notebook refuses to run without CUDA.
+---
+
+## Architecture
+
+```text
+cortex-0/
+├── cortex/
+│   ├── config.py            # CortexConfig (miroir de Llama)
+│   ├── model/               # RMSNorm, RoPE, GQA, SwiGLU, Transformer, sampling
+│   ├── tokenizer/           # BPE byte-level + template de chat CORTEX
+│   ├── training/            # données, trainer, SFT, corpus synthétique
+│   ├── evaluation/          # perplexité, suite arithmétique/logique
+│   ├── reasoning/           # vérificateur AST, best-of-N, révision, GRPO
+│   ├── memory/              # SQLite + FTS5, embeddings hashés, consolidation
+│   ├── planning/            # objectifs et missions persistantes
+│   ├── initiative/          # curiosité, idées, auto-évaluation, scheduler
+│   ├── conversation/        # compagnon conversationnel proactif
+│   ├── agents/              # sandbox, workspace, orchestrateur
+│   ├── coding/              # agent de codage + outils
+│   ├── tools/               # registre d'outils typés
+│   ├── execution/           # file de tâches durable + workers
+│   └── api/                 # FastAPI
+├── configs/                 # tiny-cpu (2,6 M), cortex-50m, cortex-150m
+├── scripts/                 # prepare_data, train, train_sft, train_grpo, ...
+├── tests/                   # 89 tests
+├── docs/                    # architecture, training, sécurité, roadmap
+└── pyproject.toml
+```
+
+Détails : [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+### Modèle
+
+- Decoder-only Transformer, pré-norm RMSNorm.
+- RoPE, attention causale, GQA (`num_key_value_heads`).
+- SwiGLU, embeddings liés (`tie_word_embeddings`).
+- KV-cache, génération autoregressive, température, top-k, top-p,
+  répétition penalty, streaming token par token.
+- Noms de tenseurs identiques à `transformers.LlamaForCausalLM`.
+
+Le preset `tiny-cpu` (2,56 M de paramètres, contexte 256) est celui qui est
+entraîné ici. Les presets `cortex-50m` et `cortex-150m` sont fournis et
+configurés, mais **ne sont pas entraînés** dans ce dépôt (CPU uniquement).
+
+---
+
+## Entraînement
+
+- Corpus : Les Misérables, Vingt Mille Lieues sous les mers, Le Comte de
+  Monte-Cristo, Frankenstein, TinyShakespeare, Wikipédia FR.
+- 5,92 M tokens d'entraînement, 133 K tokens de validation.
+- 12,29 M tokens vus en 3 000 steps (~2 époques), loss finale 3,683.
+- Tokenizer BPE byte-level, 4096 tokens, 10 tokens spéciaux.
+- 3 000 steps, batch 16, contexte 256, AdamW, cosine schedule, warmup 150.
+- Débit mesuré : ~5 700 tokens/s sur CPU.
+- Meilleure validation : loss 3,634 ; perplexité 37,44 sur 102 400 tokens.
+- Checkpoints : `checkpoints/tiny-cpu/checkpoint-*`, meilleur modèle dans
+  `checkpoints/tiny-cpu/best`.
+
+Détails et journal : [`docs/TRAINING.md`](docs/TRAINING.md).
+
+---
+
+## Évaluation
+
+Deux niveaux, volontairement séparés :
+
+1. **Perplexité** sur la validation (loss, perplexité, bits/token).
+2. **Suite interne** `cortex-internal-v1` : arithmétique et logique, en
+   français et en anglais, avec vérité terrain calculée.
+
+Cette suite **n'est ni MMLU, ni GSM8K, ni un benchmark externe**. Les résultats
+sont écrits dans `experiments/eval-tiny-cpu.json` avec le commit Git, la date,
+le device et le nombre de paramètres. Voir [`docs/EVALUATION.md`](docs/EVALUATION.md).
+
+---
+
+## Raisonnement
+
+- `ArithmeticVerifier` : parse la réponse et vérifie l'arithmétique via un
+  évaluateur AST restreint (pas un second LLM).
+- `ReasoningEngine` : best-of-N, choix par vérification puis log-probabilité,
+  révision optionnelle, enregistrement des exécutions.
+- `grpo.py` : avantages de groupe, objectif clippé, KL optionnel.
+- `scripts/train_grpo.py` : boucle expérimentale réelle avec récompense
+  programmatique. Ce n'est pas une preuve de raisonnement fort : les résultats
+  sont journalisés step par step.
+
+```bash
+python scripts/train_grpo.py --model-dir checkpoints/tiny-cpu \
+  --steps 50 --group-size 4 --out checkpoints/tiny-cpu-grpo
+```
+
+---
+
+## Mémoire
+
+SQLite + FTS5, sept types : `working`, `short_term`, `long_term`, `episodic`,
+`semantic`, `project`, `preference`.
+
+- Recherche hybride : FTS5 + recouvrement lexical + embeddings hashés.
+- Consolidation extractive des conversations en mémoire sémantique.
+- Mémoire projet, préférences utilisateur, journal d'événements.
+- La mémoire externe est distincte des connaissances intégrées dans les poids.
+  Aucune mise à jour de poids n'est faite automatiquement.
+
+---
+
+## Autonomie et initiative
+
+Le moteur d'initiative propose **au plus un message à la fois**, et seulement si
+la policy l'autorise :
+
+- heures calmes (22h–7h par défaut) ;
+- intervalle minimum (15 min) et plafond quotidien (6) ;
+- l'utilisateur doit être inactif depuis 5 min ;
+- nombre d'initiatives en attente limité ;
+- déduplication lexicale et sémantique ;
+- score minimum.
+
+Sources : objectifs bloqués, mémoire projet, questions sans réponse,
+recombinaison d'idées, auto-évaluation des raisonnements. Chaque proposition
+est persistée avec son score et sa source ; elle peut être ignorée.
+
+```bash
+cortex serve --model-dir checkpoints/tiny-cpu --scheduler
+curl -X POST localhost:8000/v1/initiatives/tick -H 'content-type: application/json' -d '{}'
+```
+
+---
+
+## Agent de codage
+
+Capacités : lire un dépôt, lister les fichiers, lire/écrire, exécuter des
+commandes autorisées, lancer pytest, voir le diff, préparer un commit.
+
+Garde-fous :
+
+- jail de chemins dans le workspace ;
+- liste blanche d'exécutables (`python3`, `pytest`, `git`, `ls`, ...) ;
+- `git push`, `git remote`, `git config` interdits ;
+- variables d'environnement suspectes refusées ;
+- limites CPU/mémoire/taille de fichier ;
+- écritures, commandes et commits soumis à **approbation explicite** ;
+- missions persistantes avec plan, checkpoints et reprise ;
+- une nouvelle instruction met à jour le plan sans rejouer le travail terminé.
+
+Limite importante : c'est un sandbox **processus**, pas un conteneur. Il ne
+protège pas contre du code Python malveillant qui lirait `/etc` ou ouvrirait
+une socket. Voir [`docs/SECURITY.md`](docs/SECURITY.md).
+
+---
 
 ## API
 
-```bash
-curl -s localhost:8000/health
-curl -s -X POST localhost:8000/generate \
-  -H 'content-type: application/json' \
-  -d '{"prompt":"Once upon a time","max_new_tokens":80,"temperature":0.8}'
-curl -s -X POST localhost:8000/chat \
-  -H 'content-type: application/json' \
-  -d '{"message":"Bonjour","session_id":"demo"}'
-```
+`uvicorn cortex.api.app:app` ou `cortex serve`. Documentation interactive sur
+`/docs`. Authentification optionnelle par `x-api-key` (`CORTEX_API_KEY`).
 
-Endpoints: `/health`, `/model/info`, `/generate`, `/chat`, `/memory/*`, `/tasks/*`,
-`/initiative/tick`, `/initiative/history`, `/tools`.
+| Méthode | Route | Rôle |
+| --- | --- | --- |
+| GET | `/health` | état public |
+| GET | `/v1/model/info` | paramètres, contexte, device |
+| POST | `/v1/generate` | génération |
+| POST | `/v1/generate/stream` | génération SSE |
+| POST | `/v1/chat` | conversation |
+| POST | `/v1/chat/stream` | conversation SSE |
+| POST | `/v1/reason` | raisonnement vérifié |
+| GET/POST | `/v1/memory*` | mémoire |
+| GET/POST/PATCH | `/v1/goals*` | objectifs |
+| GET/POST | `/v1/missions*` | missions et approbations |
+| GET/POST | `/v1/tasks*` | file de tâches |
+| GET/POST | `/v1/initiatives*` | initiatives |
+| GET | `/v1/events` | SSE des initiatives en attente |
 
-`uvicorn cortex.api.app:create_app --factory` also works.
+---
 
-## Autonomy
+## Hugging Face
 
-Autonomy is implemented as measurable software behaviour:
-
-* **Initiative engine** — proposes a message only when enabled, outside quiet hours, after cooldown,
-  under the daily cap, with sufficient novelty and score. Silence is the default.
-* **Persistent tasks** — SQLite tasks and steps survive process restarts; new instructions are
-  appended without discarding completed work; checkpoints allow resumption.
-* **Coding agent** — reads a workspace, plans, edits files, runs allowlisted commands and tests,
-  snapshots and restores. `delete`, `install`, `network` and `deploy` require approval.
-* **Memory** — six tiers, TF-IDF retrieval with recency decay, consolidation of repeated
-  statements. This is external memory; it never silently updates the weights.
-
-## Tests
+Le dossier `export/Cortex-0` est généré par :
 
 ```bash
-python -m pytest tests/ -q          # unit and integration tests
-python -m cortex.evaluation.suite   # mechanism checks, JSON report
+python scripts/export_hf.py --model-dir checkpoints/tiny-cpu \
+  --out export/Cortex-0 --verify
 ```
 
-The suite separates `mechanism` checks from `quality` checks. A mechanism pass is not a quality
-claim.
+La vérification charge le modèle avec `transformers.LlamaForCausalLM` et
+compare les logits : écart maximal mesuré **0.0**, tokenizer identique.
 
-## Documentation
+La publication est prête mais **bloquée** : aucun `HF_TOKEN` n'est disponible
+dans cet environnement. Voir [`docs/HF_PUBLISHING.md`](docs/HF_PUBLISHING.md).
 
-* [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-* [`docs/RESULTS.md`](docs/RESULTS.md) — measured numbers and exact commands
-* [`docs/ROADMAP.md`](docs/ROADMAP.md)
-* [`docs/SECURITY.md`](docs/SECURITY.md)
-* [`docs/LANGUAGES.md`](docs/LANGUAGES.md)
-* [`MODEL_CARD.md`](MODEL_CARD.md)
+---
 
-## Limitations
+## Sécurité
 
-* The CPU model produces simple story-like text. It does not reason reliably, follow instructions
-  reliably, or know facts.
-* No benchmark number is invented. Arithmetic accuracy is reported as measured, including 0%.
-* The sandbox is process-level, not a security boundary.
-* Soussou, Malinké and Bambara are encodable by the byte-level tokenizer but were not part of
-  training. No coverage is claimed.
-* The model has no safety alignment.
+- Aucun secret dans le code, les logs ou les commits.
+- Aucun benchmark inventé, aucun poids non entraîné présenté comme final.
+- Licences et sources des datasets vérifiées.
+- Opérations sensibles soumises à autorisation.
+- Journaux d'exécution et checkpoints conservés.
 
-## License
+Voir [`docs/SECURITY.md`](docs/SECURITY.md).
 
-Code: Apache-2.0. Pretraining data: TinyStories, CDLA-Sharing-1.0. See [`datasets/README.md`](datasets/README.md).
+---
+
+## Feuille de route
+
+Phases 1–11 largement couvertes ; phase 12 (publication) partielle à cause du
+token HF manquant. Prochaines étapes : entraîner 50M/150M sur GPU, ajouter des
+données africaines (soussou, malinké, bambara), renforcer le raisonnement,
+brancher un vrai runtime isolé (conteneur/K8s) pour l'agent.
+
+Voir [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
+---
+
+## Licence
+
+Apache-2.0. Voir [`LICENSE`](LICENSE).
+
+Frankenstein-Labs — **CORTEX-0, building autonomous intelligence.**

@@ -1,104 +1,91 @@
 from __future__ import annotations
 
-from datetime import datetime
+import time
 
-from cortex.initiative.engine import (
-    InitiativeConfig,
-    InitiativeEngine,
-    RecordingNotifier,
-    WebhookNotifier,
-)
-from cortex.memory.store import MemoryStore
-from cortex.planning.tasks import TaskStore
+from cortex.initiative.engine import InitiativeEngine
+from cortex.initiative.policy import InitiativePolicy
+from cortex.initiative.scheduler import InitiativeScheduler
 
 
-def _noon() -> float:
-    return datetime(2026, 1, 15, 12, 0, 0).timestamp()
+def _ts(hour: int) -> float:
+    return time.mktime((2026, 1, 1, hour, 0, 0, 0, 0, -1))
 
 
-def _engine(tmp_path, **cfg):
-    store = MemoryStore(tmp_path / "m.db")
-    store.upsert_project("CORTEX-0", goal="build a reasoning engine with tests")
-    tasks = TaskStore(tmp_path / "t.db", checkpoint_dir=tmp_path / "ckpt")
-    tasks.create_task("Reasoning engine", goal="implement arithmetic", steps=["write tests", "implement verifier"])
-    notifier = RecordingNotifier()
-    params = dict(min_interval_sec=0, min_score=0.0, min_novelty=0.0, quiet_hours_start=0, quiet_hours_end=0)
-    params.update(cfg)
-    config = InitiativeConfig(**params)
-    engine = InitiativeEngine(store, tasks=tasks, config=config, notifier=notifier)
-    return engine, store, notifier
+def test_quiet_hours():
+    policy = InitiativePolicy(quiet_hours=(22, 7))
+    assert policy.in_quiet_hours(_ts(23))
+    assert policy.in_quiet_hours(_ts(3))
+    assert not policy.in_quiet_hours(_ts(12))
+    assert not InitiativePolicy(quiet_hours=None).in_quiet_hours(_ts(23))
 
 
-def test_disabled_engine_is_silent(tmp_path):
-    engine, _, notifier = _engine(tmp_path, enabled=False)
-    decision = engine.tick(now=_noon())
-    assert decision.message is None
-    assert decision.reason == "initiative disabled"
-    assert notifier.messages == []
-
-
-def test_quiet_hours_suppress(tmp_path):
-    engine, _, notifier = _engine(tmp_path)
-    engine.config.quiet_hours_start = 0
-    engine.config.quiet_hours_end = 23
-    decision = engine.tick(now=_noon())
-    assert decision.message is None
-    assert decision.reason == "quiet hours"
-    assert notifier.messages == []
-
-
-def test_delivers_once_then_cooldown(tmp_path):
-    engine, store, notifier = _engine(tmp_path, min_interval_sec=900)
-    first = engine.tick(now=_noon())
-    assert first.message is not None, first.reason
-    assert first.message.delivered
-    assert len(notifier.messages) == 1
-    assert store.recent_initiatives(limit=5)
-    second = engine.tick(now=_noon() + 100)
-    assert second.message is None
-    assert second.reason == "cooldown"
-
-
-def test_daily_cap(tmp_path):
-    engine, _, notifier = _engine(tmp_path, max_per_day=1)
-    assert engine.tick(now=_noon()).message is not None
-    assert engine.tick(now=_noon() + 3600).message is None
-    assert engine.tick(now=_noon() + 3600).reason == "daily cap reached"
-    assert len(notifier.messages) == 1
-
-
-def test_novelty_gate(tmp_path):
-    engine, store, notifier = _engine(tmp_path, min_novelty=0.99)
-    candidates = engine._candidates("default")
-    assert candidates
-    store.add_initiative(candidates[0].kind, candidates[0].text, 1.0, delivered=True, ts=_noon() - 10)
-    decision = engine.tick(now=_noon())
-    assert decision.message is None
-    assert "novel" in decision.reason
-
-
-def test_no_candidates(tmp_path):
-    store = MemoryStore(tmp_path / "empty.db")
-    engine = InitiativeEngine(
-        store,
-        config=InitiativeConfig(min_interval_sec=0, quiet_hours_start=0, quiet_hours_end=0),
-        notifier=RecordingNotifier(),
+def test_policy_rate_limits():
+    policy = InitiativePolicy(
+        quiet_hours=None, min_interval_seconds=60, daily_cap=2, max_pending=1
     )
-    decision = engine.tick(now=_noon())
-    assert decision.message is None
-    assert decision.reason == "no candidate"
+    assert policy.check(1000, None, 0, 0, None) == (True, "allowed")
+    assert policy.check(1000, 990, 0, 0, None) == (False, "min_interval")
+    assert policy.check(1000, None, 2, 0, None) == (False, "daily_cap")
+    assert policy.check(1000, None, 0, 1, None) == (False, "too_many_pending")
+    assert policy.check(1000, None, 0, 0, 999)[0] is False
 
 
-def test_webhook_validation():
-    import pytest
+def _engine(store) -> InitiativeEngine:
+    policy = InitiativePolicy(
+        quiet_hours=None,
+        min_interval_seconds=0,
+        daily_cap=10,
+        idle_min_seconds=0,
+        min_score=0.3,
+        max_pending=3,
+    )
+    return InitiativeEngine(store, policy=policy, seed=0)
 
-    with pytest.raises(ValueError):
-        WebhookNotifier("ftp://example.com")
+
+def test_engine_proposes_then_deduplicates(store):
+    store.add("Le projet CORTEX-0 développe un moteur de raisonnement.", kind="project")
+    engine = _engine(store)
+    now = time.time()
+    first = engine.tick(now=now)
+    assert len(first) == 1
+    assert first[0].message
+    assert first[0].status == "pending"
+    second = engine.tick(now=now + 1)
+    assert second == []
 
 
-def test_history_persisted(tmp_path):
-    engine, _, _ = _engine(tmp_path)
-    engine.tick(now=_noon())
-    history = engine.history(limit=5)
-    assert len(history) == 1
-    assert history[0]["content"]
+def test_daily_cap_and_dismiss(store):
+    store.add("Une mémoire importante sur le raisonnement.", kind="project")
+    engine = _engine(store)
+    engine.policy.daily_cap = 1
+    first = engine.tick(now=time.time())
+    assert len(first) == 1
+    engine.mark_sent(first[0].id)
+    assert engine.tick(now=time.time() + 1) == []
+    assert engine.recent(status="sent")[0].status == "sent"
+    assert engine.dismiss(first[0].id).status == "dismissed"
+
+
+def test_scheduler_respects_interval(store):
+    store.add("Le projet CORTEX-0 explore la planification.", kind="project")
+    engine = _engine(store)
+    delivered = []
+    scheduler = InitiativeScheduler(
+        engine,
+        store,
+        interval_seconds=60,
+        notifier=delivered.append,
+        clock=lambda: 1000.0,
+    )
+    first = scheduler.run_once(now=1000.0)
+    assert len(first) == 1
+    assert len(delivered) == 1
+    assert scheduler.run_once(now=1001.0) == []
+    assert engine.recent(status="sent")
+
+
+def test_disabled_policy_never_proposes(store):
+    store.add("Une mémoire quelconque sur un sujet.", kind="project")
+    engine = _engine(store)
+    engine.policy.enabled = False
+    assert engine.tick(now=time.time()) == []

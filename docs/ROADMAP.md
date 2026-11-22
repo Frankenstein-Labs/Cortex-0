@@ -1,37 +1,120 @@
-# CORTEX-0 roadmap and status
+# Feuille de route
 
-Status values: **done** (implemented and tested), **measured** (a real run produced numbers),
-**partial** (scaffolding exists, quality not demonstrated), **blocked** (missing resource).
+Statut réel, sans extrapolation. Une case cochée signifie : code présent,
+testé, et exécuté dans cet environnement.
 
-| Phase | Scope | Status | Evidence |
-| --- | --- | --- | --- |
-| 1 | Scientific design | done | `docs/ARCHITECTURE.md` |
-| 2 | GitHub repository | done | `Frankenstein-Labs/Cortex-0` |
-| 2b | Hugging Face repository | blocked | no `HF_TOKEN` in this environment |
-| 3 | Transformer architecture | done | `cortex/model`, model tests |
-| 4 | Tokenizer + autoregressive prediction | done | trained 8,192-token BPE, sampling tests |
-| 5 | Pretraining pipeline | done + measured | CPU run, `checkpoints/cortex-0-nano` |
-| 6 | First tests and benchmarks | done | `python -m cortex.evaluation.suite` |
-| 7 | Fine-tuning and reasoning | partial | SFT pipeline + reasoning engine; short SFT run |
-| 8 | Memory and conversation | done | SQLite tiers, companion, tests |
-| 9 | Autonomy and missions | done | initiative engine, persistent tasks, tests |
-| 10 | Specialised skills | partial | arithmetic verifier; general skills need a larger model |
-| 11 | API and experimental interface | done | FastAPI, CLI, Docker |
-| 12 | Global evaluation, docs, publication | done + measured | README, model card, results |
+## Phase 1 — Étude et conception
 
-## What is deliberately not claimed
+- [x] Architecture Llama-compatible documentée.
+- [x] Choix RoPE, RMSNorm, SwiGLU, GQA justifiés.
+- [x] Budget mémoire et contexte dimensionnés pour le CPU.
+- [x] Distinction explicite entre mémoire externe et connaissances des poids.
 
-* The 3.15M-parameter CPU model is not an assistant and does not reason reliably.
-* No benchmark score is invented. Arithmetic accuracy is reported as measured, including 0%.
-* Autonomy is software behaviour with gates and logs, not consciousness.
-* General skills (science, law, business, African languages) require data and compute that are not
-  available in this environment. The tokenizer is language-agnostic; coverage is not claimed.
+## Phase 2 — Dépôts
 
-## Next steps (GPU required)
+- [x] Dépôt de code prêt (GitHub `Frankenstein-Labs/Cortex-0`).
+- [ ] Dépôt Hugging Face créé — **bloqué** : aucun `HF_TOKEN`.
+- [x] Export HF vérifié numériquement (`max_logit_diff = 0.0`).
 
-1. Train `cortex-0-small` (26.7M) or `cortex-0-base` (81.8M) with the Colab notebook.
-2. Train a larger tokenizer (16k–32k) on a multilingual corpus including Soussou, Malinké and Bambara.
-3. Run supervised fine-tuning on curated reasoning traces.
-4. Implement GRPO on verifiable arithmetic/code tasks; compare against the SFT baseline.
-5. Publish weights and tokenizer to Hugging Face with a model card.
-6. Add an embedding-based memory index once a sentence encoder is available.
+## Phase 3 — Architecture du modèle
+
+- [x] Embeddings, RoPE, attention causale, GQA, KV-cache.
+- [x] RMSNorm, SwiGLU, résidus, tête de langage, embeddings liés.
+- [x] Tests : causalité, cache incrémental, masque de padding, garde de contexte.
+- [x] Presets 2,6 M, 50 M et 150 M.
+
+## Phase 4 — Tokenizer et prédiction
+
+- [x] BPE byte-level 4 096, 10 tokens spéciaux.
+- [x] Aller-retour octet-exact (français, langues africaines, emoji, code).
+- [x] Next-token prediction, logits, softmax.
+- [x] Température, top-k, top-p, répétition penalty, greedy, streaming.
+
+## Phase 5 — Préentraînement
+
+- [x] Corpus multi-sources avec licences et SHA-256.
+- [x] Tokenisation binaire `uint16`.
+- [x] Trainer AdamW + cosine + warmup + clipping + AMP optionnel.
+- [x] Checkpoints, reprise, meilleur modèle.
+- [x] Run CPU 3 000 steps, ~5 700 tokens/s.
+
+## Phase 6 — Tests et benchmarks
+
+- [x] 89 tests unitaires et d'intégration.
+- [x] Perplexité de validation.
+- [x] Suite interne arithmétique/logique FR/EN.
+- [ ] Benchmarks externes (MMLU, GSM8K) — non installés, non revendiqués.
+
+## Phase 7 — Fine-tuning et raisonnement
+
+- [x] SFT avec masquage des tours non-assistant.
+- [x] Vérificateur arithmétique AST.
+- [x] Best-of-N, révision, journalisation.
+- [x] GRPO : avantages, clipping, KL, boucle expérimentale.
+- [ ] Résultats de raisonnement forts — non obtenus avec 2,6 M de paramètres.
+
+## Phase 8 — Mémoire et conversation
+
+- [x] SQLite + FTS5, 7 types de mémoire.
+- [x] Recherche hybride, consolidation extractive.
+- [x] Préférences, mémoire projet, journal d'événements.
+- [x] Compagnon conversationnel, template `Tu es CORTEX`, fallback honnête.
+
+## Phase 9 — Autonomie et missions
+
+- [x] Objectifs persistants.
+- [x] Missions avec plan, checkpoints, reprise.
+- [x] Nouvelles instructions sans rejouer le travail terminé.
+- [x] File de tâches durable, workers, retries, idempotence.
+- [x] Initiative : curiosité, idées, auto-évaluation, policy, scheduler.
+- [x] Déduplication et limites de fréquence.
+
+## Phase 10 — Compétences spécialisées
+
+- [x] Agent de codage : lecture, écriture, tests, diff, commit préparé.
+- [x] Sandbox avec jail de chemins et liste blanche.
+- [x] Orchestrateur multi-agents avec dépendances.
+- [ ] Compétences mathématiques fortes, recherche documentaire PDF, business.
+- [ ] Langues africaines à grande échelle (tokenizer prêt, données à ajouter).
+
+## Phase 11 — API et interface
+
+- [x] FastAPI : génération, chat, streaming SSE, raisonnement, mémoire,
+  objectifs, missions, tâches, initiatives.
+- [x] CLI unifiée `cortex`.
+- [x] Authentification optionnelle par clé.
+- [ ] Interface web dédiée — l'API expose `/docs`.
+
+## Phase 12 — Évaluation globale et publication
+
+- [x] Documentation architecture, training, sécurité, évaluation.
+- [x] Carte de modèle générée.
+- [x] CI GitHub Actions.
+- [ ] Publication Hugging Face — bloquée par le token.
+- [ ] Rapport de recherche externe.
+
+---
+
+## Prochaines étapes prioritaires
+
+1. **Token Hugging Face** : débloquer la publication, puis vérifier le
+   téléchargement dans un environnement neuf.
+2. **GPU** : entraîner `configs/cortex-50m.yaml` sur un GPU gratuit (Colab,
+   Kaggle) avec un corpus élargi.
+3. **Données africaines** : constituer un corpus soussou/malinké/bambara
+   licencié, entraîner un tokenizer dédié ou étendre le vocabulaire.
+4. **Raisonnement** : SFT sur traces vérifiées, puis GRPO avec récompenses
+   programmatiques sur un modèle plus grand.
+5. **Isolation réelle** : remplacer le sandbox processus par un conteneur
+   jetable pour l'agent de codage.
+6. **Benchmarks externes** : intégrer un harnais reproductible (MMLU, GSM8K)
+   uniquement quand les ressources permettent un run honnête.
+
+## Blocages connus
+
+| Blocage | Impact | Contournement |
+| --- | --- | --- |
+| Pas de `HF_TOKEN` | poids non publiés | export local vérifié |
+| CPU seulement | modèle 2,6 M au lieu de 50–300 M | presets prêts, run GPU à faire |
+| Pas de runtime conteneurisé | sandbox processus | approbations obligatoires |
+| Pas de benchmarks externes | pas de comparaison publique | suite interne seulement |

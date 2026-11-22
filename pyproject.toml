@@ -5,23 +5,32 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cortex-0"
 version = "0.1.0"
-description = "CORTEX-0 — a small, from-scratch decoder-only language model with autonomous software around it"
+description = "CORTEX-0 - a small, from-scratch autonomous language model by Frankenstein-Labs"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Frankenstein-Labs" }]
+keywords = ["llm", "transformer", "autonomy", "frankenstein-labs"]
 dependencies = [
   "torch>=2.2",
-  "numpy>=1.24",
-  "tokenizers>=0.19",
+  "tokenizers>=0.15",
   "safetensors>=0.4",
+  "numpy>=1.24",
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
+  "pydantic>=2.5",
+  "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
-serve = ["fastapi>=0.110", "uvicorn>=0.29", "httpx>=0.27"]
-data = ["pyarrow>=14", "datasets>=2.18"]
-dev = ["pytest>=8", "pyarrow>=14", "httpx>=0.27", "fastapi>=0.110"]
-all = ["cortex-0[serve,data,dev]"]
+train = [
+  "transformers>=4.40",
+  "datasets>=2.18",
+  "tensorboard>=2.15",
+  "huggingface_hub>=0.23",
+]
+serve = ["uvicorn[standard]>=0.27"]
+dev = ["pytest>=8.0", "httpx>=0.27", "ruff>=0.4"]
 
 [project.scripts]
 cortex = "cortex.cli:main"
@@ -33,5 +42,9 @@ include = ["cortex*"]
 testpaths = ["tests"]
 addopts = "-q"
 markers = [
-  "slow: tests that run a short real training loop",
+  "slow: long-running tests (training, end-to-end)",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

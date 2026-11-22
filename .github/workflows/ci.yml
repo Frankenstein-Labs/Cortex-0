@@ -1,45 +1,44 @@
-name: ci
+name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.12"]
+        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - name: Install CPU torch and project
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install -e ".[dev]"
-      - name: Run tests
-        run: python -m pytest tests/ -q
-      - name: Run mechanism evaluation suite
-        run: python -m cortex.evaluation.suite
+          cache-dependency-path: pyproject.toml
 
-  smoke-train:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-      - name: Install
+      - name: Install CPU PyTorch
+        run: pip install --index-url https://download.pytorch.org/whl/cpu torch
+
+      - name: Install project
+        run: pip install -e ".[dev,train]"
+
+      - name: Compile sources
+        run: python -m compileall -q cortex scripts tests
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Smoke test CLI
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install -e ".[dev]"
-      - name: Train a tiny model for 30 steps on synthetic data
-        run: python scripts/ci_smoke_train.py
+          cortex --help
+          cortex init-db --db-path /tmp/cortex-ci.sqlite

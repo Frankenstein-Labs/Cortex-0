@@ -1,0 +1,82 @@
+{
+  "sources": [
+    {
+      "name": "les_miserables_1",
+      "language": "fr",
+      "url": "https://gutenberg.pglaf.org/cache/epub/17489/pg17489.txt",
+      "chars": 658399,
+      "documents": 180,
+      "sha256": "f3ef3d2c6dbe92a222c423391206b06794fec70489a1b998758f6f66e9a72e0a",
+      "license": "public domain"
+    },
+    {
+      "name": "vingt_mille_lieues",
+      "language": "fr",
+      "url": "https://gutenberg.pglaf.org/cache/epub/5097/pg5097.txt",
+      "chars": 877509,
+      "documents": 238,
+      "sha256": "431a679de287d2e6515a878024c5aacc5679d04e2ca389dbdd21c2c484052102",
+      "license": "public domain"
+    },
+    {
+      "name": "monte_cristo_1",
+      "language": "fr",
+      "url": "https://gutenberg.pglaf.org/cache/epub/17989/pg17989.txt",
+      "chars": 727999,
+      "documents": 191,
+      "sha256": "f05096752513c5d0f91b13e7f45402b6c64347087f47e2661e971b2a7d3660f7",
+      "license": "public domain"
+    },
+    {
+      "name": "frankenstein",
+      "language": "en",
+      "url": "https://gutenberg.pglaf.org/cache/epub/84/pg84.txt",
+      "chars": 420173,
+      "documents": 118,
+      "sha256": "a7e64d4447cad7b3abbbb6cdb3fc22f2215fee8ac34dfdb922927faba2fa63b3",
+      "license": "public domain"
+    },
+    {
+      "name": "tinyshakespeare",
+      "language": "en",
+      "url": "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
+      "chars": 1115375,
+      "documents": 404,
+      "sha256": "54d56f660b76d10f46d854a0925d2b9b3a9ee67d3003189214a51f124d337bfe",
+      "license": "public domain"
+    },
+    {
+      "name": "wikipedia_fr",
+      "language": "fr",
+      "url": "https://datasets-server.huggingface.co/rows?dataset=wikimedia/wikipedia&config=20231101.fr",
+      "documents": 2147,
+      "chars": 13934158,
+      "license": "CC BY-SA 4.0"
+    },
+    {
+      "name": "project_code",
+      "documents": 15,
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "synthetic_reasoning",
+      "documents": 2550,
+      "license": "Apache-2.0",
+      "note": "deterministically generated arithmetic and logic traces"
+    }
+  ],
+  "synthetic": true,
+  "seed": 1337,
+  "vocab_size": 4096,
+  "documents": {
+    "train": 5448,
+    "val": 119
+  },
+  "tokens": {
+    "train": 5923113,
+    "val": 132854
+  },
+  "val_ratio": 0.02,
+  "train_sha256": "8f7ec4fcf04c97f9ff0f65aa2cb3822d5fc575db30bf2b9f99e29c19fd7cb632",
+  "val_sha256": "5639bca8030f70aa4f05ec82a5b685a019f29ff221f0b77a97d12c923b347ab6"
+}

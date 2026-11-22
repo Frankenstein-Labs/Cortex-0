@@ -1,67 +1,80 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
-from cortex.planning.tasks import TaskStore
+from cortex.planning.goals import GoalStore
+from cortex.planning.missions import MissionStore, default_plan
 
 
-def test_create_and_progress(tmp_path):
-    store = TaskStore(tmp_path / "tasks.db", checkpoint_dir=tmp_path / "ckpt")
-    task = store.create_task("Build auth", goal="secure login", steps=["read repo", "write code", "run tests"])
-    assert task.status == "open"
-    assert len(task.steps) == 3
-    step = store.start_next_step(task.id)
-    assert step.description == "read repo" and step.status == "in_progress"
-    task = store.complete_step(task.id, step.id, "done")
-    assert task.progress == pytest.approx(1 / 3)
-    assert task.next_step().description == "write code"
-    task = store.complete_step(task.id, task.next_step().id)
-    task = store.complete_step(task.id, task.next_step().id)
-    assert task.status == "done"
+def test_goal_lifecycle(store):
+    goals = GoalStore(store)
+    goal = goals.create("Construire CORTEX-0", "Une petite LLM autonome", priority=0.8)
+    assert goal.status == "active"
+    assert goals.get(goal.id).title == "Construire CORTEX-0"
+    updated = goals.update(goal.id, progress=0.4, priority=0.9)
+    assert updated.progress == pytest.approx(0.4)
+    assert updated.priority == pytest.approx(0.9)
+    assert [item.id for item in goals.list(status="active")] == [goal.id]
+    completed = goals.complete(goal.id)
+    assert completed.status == "completed"
+    assert goals.list(status="active") == []
 
 
-def test_add_instruction_preserves_progress(tmp_path):
-    store = TaskStore(tmp_path / "tasks.db", checkpoint_dir=tmp_path / "ckpt")
-    task = store.create_task("Build auth", steps=["read repo", "write code"])
-    step = store.start_next_step(task.id)
-    store.complete_step(task.id, step.id, "read")
-    task = store.add_instruction(task.id, "also add logout")
-    assert task.revision == 1
-    assert len(task.steps) == 3
-    assert task.steps[0].status == "done"
-    assert task.steps[2].status == "pending"
+def test_stalled_goals(store):
+    goals = GoalStore(store)
+    goal = goals.create("Objectif ancien", priority=0.5)
+    stalled = goals.stalled(older_than_seconds=0, now=time.time() + 10)
+    assert [item.id for item in stalled] == [goal.id]
+    assert goals.stalled(older_than_seconds=10**9, now=time.time() + 10) == []
 
 
-def test_resume_across_processes(tmp_path):
-    db = tmp_path / "tasks.db"
-    store = TaskStore(db, checkpoint_dir=tmp_path / "ckpt")
-    task = store.create_task("Mission", steps=["a", "b"])
-    step = store.start_next_step(task.id)
-    store.complete_step(task.id, step.id, "ok")
-    store.checkpoint(task.id, "after-a", {"files": ["x.py"]})
-    store.close()
-
-    reopened = TaskStore(db, checkpoint_dir=tmp_path / "ckpt")
-    resumed = reopened.resume(task.id)
-    assert resumed["next_step"]["description"] == "b"
-    assert resumed["progress"] == pytest.approx(0.5)
-    assert resumed["latest_checkpoint"]["data"]["files"] == ["x.py"]
-    assert reopened.get_task(task.id).status == "in_progress"
-    reopened.close()
+def test_default_plan_has_five_steps():
+    plan = default_plan("Ajouter l'authentification")
+    assert len(plan) == 5
+    assert [step["id"] for step in plan] == [1, 2, 3, 4, 5]
+    assert all(step["status"] == "pending" for step in plan)
 
 
-def test_invalid_status(tmp_path):
-    store = TaskStore(tmp_path / "tasks.db")
-    task = store.create_task("x")
+def test_mission_progress_and_resume(store):
+    missions = MissionStore(store)
+    mission = missions.create("Auth", "Ajouter l'authentification")
+    first = mission.next_step()
+    assert first.id == 1
+    mission = missions.update_step(mission.id, 1, "done", result='{"ok": true}')
+    assert mission.next_step().id == 2
+    missions.update_step(mission.id, 2, "in_progress")
+    resumed = missions.resume(mission.id)
+    assert resumed["mission"]["id"] == mission.id
+    assert resumed["next_step"]["id"] == 2
+    assert resumed["last_checkpoint"] is None
+
+
+def test_new_instruction_preserves_completed_work(store):
+    missions = MissionStore(store)
+    mission = missions.create("Auth", "Ajouter l'authentification")
+    missions.update_step(mission.id, 1, "done", result="inspection terminée")
+    missions.update_step(mission.id, 2, "in_progress")
+    updated = missions.add_instruction(mission.id, "Utiliser OAuth")
+    assert updated.instructions[-1]["text"] == "Utiliser OAuth"
+    assert updated.plan[0]["status"] == "done"
+    assert updated.plan[1]["status"] == "pending"  # in-progress work is re-queued, not lost
+    assert updated.plan[-1]["title"].startswith("Intégrer la nouvelle instruction")
+    assert any(checkpoint["label"] == "instruction-added" for checkpoint in updated.checkpoints)
+
+
+def test_mission_status_validation(store):
+    missions = MissionStore(store)
+    mission = missions.create("Test", "Faire quelque chose")
     with pytest.raises(ValueError):
-        store.set_status(task.id, "exploded")
-    with pytest.raises(KeyError):
-        store.get_task(999)
+        missions.set_status(mission.id, "invented")
+    assert missions.set_status(mission.id, "completed").status == "completed"
 
 
-def test_open_tasks(tmp_path):
-    store = TaskStore(tmp_path / "tasks.db")
-    a = store.create_task("a")
-    b = store.create_task("b")
-    store.set_status(b.id, "done")
-    assert [t.id for t in store.open_tasks()] == [a.id]
+def test_mission_checkpoint_limit(store):
+    missions = MissionStore(store)
+    mission = missions.create("Test", "Faire quelque chose")
+    for index in range(30):
+        missions.checkpoint(mission.id, f"step-{index}", {"index": index})
+    assert len(missions.get(mission.id).checkpoints) == 20

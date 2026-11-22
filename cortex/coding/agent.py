@@ -1,236 +1,292 @@
-"""A confined software-engineering agent.
+"""Mission-driven coding agent with approval gates and persistent state.
 
-The agent reads a workspace, builds a plan, edits files, runs allowlisted
-commands and tests, keeps checkpoints, and reports what it actually did.
-Sensitive operations (delete, dependency install, network, deploy) require an
-explicit approval.
+The agent separates *policy* (what to do next) from *tools* (how to do it).
+``ScriptedPolicy`` is deterministic and used in tests; ``ModelPolicy`` asks the
+local language model for one JSON action at a time.  The tiny model is not a
+reliable coder yet, so the default plan is conservative and every dangerous
+action requires explicit approval.
 """
 
 from __future__ import annotations
 
 import json
-import shutil
-import time
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Sequence
+import re
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Protocol
 
-from cortex.execution.sandbox import CommandResult, Sandbox
+import torch
 
-SENSITIVE_ACTIONS = {"delete", "install", "network", "deploy", "overwrite_outside_plan"}
-_IGNORED_DIRS = {".git", "__pycache__", ".pytest_cache", "node_modules", ".venv", "venv", "checkpoints"}
+from ..agents.workspace import Workspace
+from ..model.generation import generate
+from ..model.transformer import CortexForCausalLM
+from ..planning.missions import Mission, MissionStore
+from ..tokenizer.bpe import CortexTokenizer
+from ..tools.registry import ToolError, ToolRegistry
+from .tools import build_workspace_registry
 
-
-class ApprovalRequired(RuntimeError):
-    def __init__(self, action: str, detail: str) -> None:
-        super().__init__(f"approval required for {action}: {detail}")
-        self.action = action
-        self.detail = detail
+JSON_PATTERN = re.compile(r"\{.*\}", re.S)
 
 
 @dataclass
-class ApprovalPolicy:
-    auto_approve: set[str] = field(default_factory=set)
+class CodingAction:
+    tool: str
+    args: Dict[str, object]
+    rationale: str = ""
 
-    def require(self, action: str, detail: str) -> None:
-        if action in SENSITIVE_ACTIONS and action not in self.auto_approve:
-            raise ApprovalRequired(action, detail)
+    def to_dict(self) -> dict:
+        return {"tool": self.tool, "args": self.args, "rationale": self.rationale}
 
 
-@dataclass
-class MissionReport:
-    goal: str
-    steps: list[dict] = field(default_factory=list)
-    files_changed: list[str] = field(default_factory=list)
-    commands: list[dict] = field(default_factory=list)
-    tests: dict | None = None
-    status: str = "completed"
-    started_at: float = field(default_factory=time.time)
-    finished_at: float | None = None
+class Policy(Protocol):
+    def next_action(self, mission: Mission, last_result: Optional[dict]) -> Optional[CodingAction]:
+        ...
 
-    def as_dict(self) -> dict:
-        return {
-            "goal": self.goal,
-            "status": self.status,
-            "steps": self.steps,
-            "files_changed": self.files_changed,
-            "commands": self.commands,
-            "tests": self.tests,
-            "started_at": self.started_at,
-            "finished_at": self.finished_at,
-            "duration_sec": round((self.finished_at or time.time()) - self.started_at, 3),
-        }
+
+class ScriptedPolicy:
+    """Deterministic policy for tests and dry runs."""
+
+    def __init__(self, actions: List[CodingAction]) -> None:
+        self.actions = list(actions)
+        self.index = 0
+
+    def next_action(self, mission: Mission, last_result: Optional[dict]) -> Optional[CodingAction]:
+        if self.index >= len(self.actions):
+            return None
+        action = self.actions[self.index]
+        self.index += 1
+        return action
+
+
+class ModelPolicy:
+    def __init__(
+        self,
+        model: CortexForCausalLM,
+        tokenizer: CortexTokenizer,
+        registry: ToolRegistry,
+        device: str | torch.device = "cpu",
+        max_new_tokens: int = 192,
+        seed: int = 0,
+    ) -> None:
+        self.model = model
+        self.tokenizer = tokenizer
+        self.registry = registry
+        self.device = torch.device(device)
+        self.model.to(self.device)
+        self.max_new_tokens = max_new_tokens
+        self.seed = seed
+        self.last_error: Optional[str] = None
+
+    def _prompt(self, mission: Mission, last_result: Optional[dict]) -> str:
+        tools = "\n".join(
+            f"- {tool['name']}({', '.join(tool['parameters'])}) : {tool['description']}"
+            for tool in self.registry.list()
+        )
+        plan = "\n".join(
+            f"{step['id']}. [{step['status']}] {step['title']}" for step in mission.plan
+        )
+        return (
+            "Tu es un agent de développement. Choisis UNE action.\n"
+            f"Mission : {mission.instruction}\nPlan :\n{plan}\n"
+            f"Dernier résultat : {json.dumps(last_result or {}, ensure_ascii=False)[:800]}\n"
+            f"Outils :\n{tools}\n"
+            'Réponds uniquement par un objet JSON : {"tool": "...", "args": {...}, "rationale": "..."}\n'
+        )
+
+    def next_action(self, mission: Mission, last_result: Optional[dict]) -> Optional[CodingAction]:
+        prompt = self._prompt(mission, last_result)
+        ids = self.tokenizer.encode(prompt)
+        max_context = self.model.config.max_position_embeddings
+        ids = ids[-(max_context - self.max_new_tokens) :]
+        input_ids = torch.tensor([ids], dtype=torch.long, device=self.device)
+        generator = torch.Generator(device="cpu").manual_seed(self.seed)
+        output = generate(
+            self.model,
+            input_ids,
+            max_new_tokens=self.max_new_tokens,
+            temperature=0.2,
+            top_p=0.9,
+            eos_token_id=self.tokenizer.eos_token_id,
+            stop_token_ids=[self.tokenizer.end_token_id],
+            generator=generator,
+            pad_token_id=self.tokenizer.pad_token_id,
+        )
+        text = self.tokenizer.decode(output[0, len(ids) :].tolist(), skip_special_tokens=True)
+        return self.parse(text)
+
+    def parse(self, text: str) -> Optional[CodingAction]:
+        match = JSON_PATTERN.search(text)
+        if not match:
+            self.last_error = "no JSON object in model output"
+            return None
+        try:
+            payload = json.loads(match.group(0))
+        except json.JSONDecodeError as exc:
+            self.last_error = f"invalid JSON: {exc}"
+            return None
+        tool = payload.get("tool") or payload.get("action")
+        args = payload.get("args") or payload.get("arguments") or {}
+        if not isinstance(tool, str) or not isinstance(args, dict):
+            self.last_error = "tool must be a string and args an object"
+            return None
+        try:
+            self.registry.get(tool)
+        except ToolError:
+            self.last_error = f"unknown tool: {tool}"
+            return None
+        return CodingAction(tool=tool, args=args, rationale=str(payload.get("rationale", "")))
 
 
 class CodingAgent:
     def __init__(
         self,
-        workspace: str | Path,
-        sandbox: Sandbox | None = None,
-        approvals: ApprovalPolicy | None = None,
-        checkpoint_dir: str | Path | None = None,
+        workspace: Workspace,
+        missions: MissionStore,
+        policy: Policy,
+        registry: Optional[ToolRegistry] = None,
+        auto_approve: bool = False,
     ) -> None:
-        self.workspace = Path(workspace).resolve()
-        self.workspace.mkdir(parents=True, exist_ok=True)
-        self.sandbox = sandbox or Sandbox(self.workspace)
-        self.approvals = approvals or ApprovalPolicy()
-        self.checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else self.workspace / ".cortex" / "checkpoints"
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.workspace = workspace
+        self.missions = missions
+        self.policy = policy
+        self.registry = registry or build_workspace_registry(workspace)
+        self.auto_approve = auto_approve
+        self._pending: Dict[str, CodingAction] = {}
+        self._last_result: Dict[str, dict] = {}
 
-    # ------------------------------------------------------------------ workspace
-    def list_files(self, max_files: int = 500) -> list[str]:
-        out: list[str] = []
-        for path in sorted(self.workspace.rglob("*")):
-            if any(part in _IGNORED_DIRS for part in path.parts):
-                continue
-            if path.is_file():
-                out.append(str(path.relative_to(self.workspace)))
-            if len(out) >= max_files:
+    def start_mission(self, title: str, instruction: str) -> Mission:
+        return self.missions.create(title, instruction)
+
+    def run_step(self, mission_id: str) -> dict:
+        mission = self.missions.get(mission_id)
+        if mission is None:
+            raise KeyError(mission_id)
+        if mission.status != "active":
+            return {"status": mission.status, "mission_id": mission_id}
+
+        step = mission.next_step()
+        if step is None:
+            self.missions.set_status(mission_id, "completed")
+            return {"status": "completed", "mission_id": mission_id}
+
+        if step.status != "in_progress":
+            mission = self.missions.update_step(mission_id, step.id, "in_progress")
+        last_result = self._last_result.get(mission_id) or self._last_step_result(mission)
+        action = self.policy.next_action(mission, last_result)
+        if action is None:
+            error = getattr(self.policy, "last_error", None)
+            self.missions.update_step(
+                mission_id,
+                step.id,
+                "done",
+                result=json.dumps({"note": "no action proposed", "error": error}, ensure_ascii=False),
+            )
+            return {
+                "status": "done",
+                "mission_id": mission_id,
+                "step": step.to_dict(),
+                "note": "no action proposed",
+                "error": error,
+            }
+
+        tool = self.registry.get(action.tool)
+        if tool.dangerous and not self.auto_approve:
+            self._pending[mission_id] = action
+            self.missions.checkpoint(
+                mission_id, "pending-action", {"action": action.to_dict()}
+            )
+            return {
+                "status": "awaiting_approval",
+                "mission_id": mission_id,
+                "step": step.to_dict(),
+                "action": action.to_dict(),
+            }
+        return self._execute(mission_id, step.id, action)
+
+    def approve(self, mission_id: str) -> dict:
+        action = self._pending.pop(mission_id, None) or self._load_pending(mission_id)
+        if action is None:
+            return {"status": "no_pending_action", "mission_id": mission_id}
+        self.missions.checkpoint(mission_id, "pending-action-cleared", {})
+        mission = self.missions.get(mission_id)
+        step = mission.next_step()
+        if step is None:
+            return {"status": "completed", "mission_id": mission_id}
+        return self._execute(mission_id, step.id, action)
+
+    def reject(self, mission_id: str, reason: str = "rejected by user") -> dict:
+        action = self._pending.pop(mission_id, None)
+        mission = self.missions.get(mission_id)
+        step = mission.next_step()
+        if step is not None:
+            self.missions.update_step(mission_id, step.id, "skipped", notes=reason)
+        return {
+            "status": "rejected",
+            "mission_id": mission_id,
+            "action": action.to_dict() if action else None,
+            "reason": reason,
+        }
+
+    def run(self, mission_id: str, max_steps: int = 8) -> dict:
+        history = []
+        for _ in range(max_steps):
+            result = self.run_step(mission_id)
+            history.append(result)
+            if result["status"] in {"awaiting_approval", "completed", "cancelled", "failed", "blocked"}:
                 break
-        return out
+        return {"mission_id": mission_id, "status": history[-1]["status"] if history else "noop", "history": history}
 
-    def read_file(self, relative_path: str | Path, max_chars: int = 200_000) -> str:
-        path = self.sandbox.resolve(relative_path)
-        if not path.exists():
-            raise FileNotFoundError(str(relative_path))
-        return path.read_text(encoding="utf-8", errors="replace")[:max_chars]
+    def add_instruction(self, mission_id: str, text: str) -> Mission:
+        return self.missions.add_instruction(mission_id, text)
 
-    def search(self, needle: str, max_results: int = 50) -> list[dict]:
-        results = []
-        for rel in self.list_files():
-            try:
-                text = (self.workspace / rel).read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
-            for lineno, line in enumerate(text.splitlines(), 1):
-                if needle in line:
-                    results.append({"file": rel, "line": lineno, "text": line.strip()[:300]})
-                    if len(results) >= max_results:
-                        return results
-        return results
+    @staticmethod
+    def _last_step_result(mission: Mission) -> Optional[dict]:
+        for step in reversed(mission.plan):
+            if step.get("result"):
+                try:
+                    return json.loads(step["result"])
+                except (TypeError, json.JSONDecodeError):
+                    return {"raw": step["result"]}
+        return None
 
-    def write_file(self, relative_path: str | Path, content: str) -> str:
-        path = self.sandbox.resolve(relative_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        return str(path.relative_to(self.workspace))
+    def _load_pending(self, mission_id: str) -> Optional[CodingAction]:
+        mission = self.missions.get(mission_id)
+        if mission is None:
+            return None
+        for checkpoint in reversed(mission.checkpoints):
+            if checkpoint.get("label") == "pending-action-cleared":
+                return None
+            if checkpoint.get("label") == "pending-action":
+                payload = checkpoint.get("state", {}).get("action")
+                if payload:
+                    return CodingAction(
+                        tool=payload["tool"],
+                        args=payload.get("args", {}),
+                        rationale=payload.get("rationale", ""),
+                    )
+        return None
 
-    def delete_file(self, relative_path: str | Path) -> None:
-        self.approvals.require("delete", str(relative_path))
-        path = self.sandbox.resolve(relative_path)
-        if path.is_dir():
-            shutil.rmtree(path)
-        elif path.exists():
-            path.unlink()
-
-    # ------------------------------------------------------------------ commands
-    def run_command(self, argv: Sequence[str], timeout_sec: float | None = None) -> CommandResult:
-        result = self.sandbox.run(argv, timeout_sec=timeout_sec)
-        if any(x in " ".join(argv) for x in ("pip install", "apt-get", "npm install")):
-            # Installations are refused after the allowlist check; keep the gate explicit.
-            self.approvals.require("install", " ".join(argv))
-        return result
-
-    def run_tests(self, target: str = "tests", timeout_sec: float = 300.0) -> CommandResult:
-        import sys
-
-        return self.sandbox.run([sys.executable, "-m", "pytest", target, "-q"], timeout_sec=timeout_sec)
-
-    # --------------------------------------------------------------- checkpoints
-    def snapshot(self, label: str) -> Path:
-        dest = self.checkpoint_dir / label
-        if dest.exists():
-            shutil.rmtree(dest)
-        dest.mkdir(parents=True)
-        for path in self.workspace.rglob("*"):
-            if any(part in _IGNORED_DIRS for part in path.relative_to(self.workspace).parts):
-                continue
-            if path.is_file() and self.checkpoint_dir not in path.parents:
-                target = dest / path.relative_to(self.workspace)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, target)
-        return dest
-
-    def restore(self, label: str) -> None:
-        src = self.checkpoint_dir / label
-        if not src.exists():
-            raise FileNotFoundError(f"checkpoint {label!r} not found")
-        for path in self.workspace.iterdir():
-            if path.name in _IGNORED_DIRS or path.name == ".cortex":
-                continue
-            if path.is_dir():
-                shutil.rmtree(path)
-            else:
-                path.unlink()
-        for path in src.rglob("*"):
-            if path.is_file():
-                target = self.workspace / path.relative_to(src)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, target)
-
-    # ------------------------------------------------------------------- missions
-    def plan(self, goal: str, files: list[str] | None = None) -> list[dict[str, Any]]:
-        """Build a deterministic, inspectable plan (no model required)."""
-        files = files if files is not None else self.list_files(max_files=40)
-        steps: list[dict[str, Any]] = [{"kind": "inspect", "description": f"Inspect workspace ({len(files)} files)"}]
-        lowered = goal.lower()
-        if any(word in lowered for word in ("test", "pytest")):
-            steps.append({"kind": "test", "description": "Run the test suite"})
-        if any(word in lowered for word in ("read", "analyse", "analyze", "understand", "explique")):
-            steps.append({"kind": "read", "description": "Read the most relevant files"})
-        if any(word in lowered for word in ("fix", "implement", "add", "build", "create", "corrige", "ajoute")):
-            steps.append({"kind": "edit", "description": "Apply the requested code change"})
-            steps.append({"kind": "test", "description": "Run tests after the change"})
-        if any(word in lowered for word in ("commit", "diff")):
-            steps.append({"kind": "diff", "description": "Show the resulting diff"})
-        return steps
-
-    def execute_mission(self, goal: str, actions: list[dict[str, Any]] | None = None) -> MissionReport:
-        """Execute explicit actions: write_file / run / test / delete.
-
-        This is intentionally not an unbounded autonomous loop: every action is
-        declared, logged and gated.
-        """
-        report = MissionReport(goal=goal)
-        plan = self.plan(goal)
-        report.steps.extend({"kind": s["kind"], "description": s["description"], "status": "planned"} for s in plan)
+    def _execute(self, mission_id: str, step_id: int, action: CodingAction) -> dict:
         try:
-            for action in actions or []:
-                kind = action.get("kind")
-                if kind == "write_file":
-                    rel = self.write_file(action["path"], action["content"])
-                    report.files_changed.append(rel)
-                    report.steps.append({"kind": kind, "path": rel, "status": "done"})
-                elif kind == "run":
-                    result = self.run_command(action["argv"], timeout_sec=action.get("timeout_sec"))
-                    report.commands.append(result.as_dict())
-                    report.steps.append({"kind": kind, "argv": action["argv"], "status": "done" if result.ok else "failed"})
-                    if not result.ok:
-                        report.status = "failed"
-                        break
-                elif kind == "test":
-                    result = self.run_tests(action.get("target", "tests"), action.get("timeout_sec", 300.0))
-                    report.tests = result.as_dict()
-                    report.steps.append({"kind": kind, "status": "done" if result.ok else "failed"})
-                    if not result.ok:
-                        report.status = "failed"
-                        break
-                elif kind == "delete":
-                    self.delete_file(action["path"])
-                    report.files_changed.append(action["path"])
-                    report.steps.append({"kind": kind, "path": action["path"], "status": "done"})
-                else:
-                    report.steps.append({"kind": kind, "status": "skipped", "reason": "unknown action"})
-        except ApprovalRequired as exc:
-            report.status = "approval_required"
-            report.steps.append({"kind": "approval", "action": exc.action, "detail": exc.detail, "status": "blocked"})
-        report.finished_at = time.time()
-        return report
-
-    def save_report(self, report: MissionReport, path: str | Path = "artifacts/coding_report.json") -> Path:
-        target = Path(path)
-        if not target.is_absolute():
-            target = self.workspace / target
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(report.as_dict(), indent=2) + "\n", encoding="utf-8")
-        return target
+            result = self.registry.execute(action.tool, action.args)
+            ok = bool(result.get("ok", True)) if isinstance(result, dict) else True
+            status = "done" if ok else "failed"
+        except ToolError as exc:
+            result = {"error": str(exc)}
+            status = "failed"
+        self._last_result[mission_id] = result if isinstance(result, dict) else {"value": result}
+        self.missions.update_step(
+            mission_id,
+            step_id,
+            status,
+            result=json.dumps(result, ensure_ascii=False)[:3000],
+        )
+        self.missions.checkpoint(
+            mission_id, f"step-{step_id}-{status}", {"action": action.to_dict(), "result": result}
+        )
+        return {
+            "status": status,
+            "mission_id": mission_id,
+            "step_id": step_id,
+            "action": action.to_dict(),
+            "result": result,
+        }
