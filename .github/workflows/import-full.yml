@@ -8,7 +8,6 @@ on:
 
 permissions:
   contents: write
-  workflows: write
 
 env:
   ARCHIVE_URL: https://work-1-sotdiufphkethnrr.prod-runtime.all-hands.dev/cortex0.tar.gz
@@ -33,7 +32,7 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/tree
           tar -xzf /tmp/repo.tar.gz -C /tmp/tree
-          rsync -a --delete --exclude .git /tmp/tree/ ./
+          rsync -a --delete --exclude .git --exclude .github/workflows/import-full.yml /tmp/tree/ ./
           git config user.name "CORTEX-0 bot"
           git config user.email "cortex-0@frankenstein-labs.local"
           git add -A
