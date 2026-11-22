@@ -2,6 +2,10 @@
 
 **Small autonomous language model — Frankenstein-Labs**
 
+> **Branch notice:** this is `rewrite/tested-core`, an alternative implementation. `main` contains
+> a pre-existing, more feature-complete implementation that has been restored. See
+> [`BRANCH_NOTICE.md`](BRANCH_NOTICE.md). This branch was not merged without authorization.
+
 CORTEX-0 is a decoder-only Transformer written from scratch in PyTorch, trained with next-token
 prediction, and surrounded by a real software stack for memory, reasoning, initiative, persistent
 missions and confined code execution.
@@ -34,11 +38,12 @@ cortex/
 | --- | --- |
 | Architecture | decoder-only Transformer, RoPE, RMSNorm, GQA, SwiGLU, tied embeddings |
 | Tokenizer | byte-level BPE, 8,192 tokens, trained on the corpus |
-| CPU checkpoint | 3.15M parameters, 19.7M training tokens |
-| Validation metrics | see [`docs/RESULTS.md`](docs/RESULTS.md) |
-| Tests | `python -m pytest tests/ -q` |
-| Mechanism suite | `python -m cortex.evaluation.suite` |
-| Instruction tuning | short SFT run; the base model is not a chat assistant |
+| CPU checkpoint | 3,147,456 parameters, 500 steps, 8.192M training tokens (early stop) |
+| Validation metrics | loss 2.5435, perplexity 12.7246, token accuracy 45.21% (40 batches) |
+| Tests | 71 passed (`python -m pytest tests/ -q`) |
+| Mechanism suite | 10/10 (`python -m cortex.evaluation.suite`) |
+| Reasoning benchmark | 0/10 arithmetic, all four strategies (measured negative result) |
+| Instruction tuning | pipeline present and tested; no SFT run on this checkpoint |
 | Hugging Face weights | blocked: no `HF_TOKEN` in the build environment |
 
 ## Quickstart
@@ -53,7 +58,7 @@ curl -sL https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/dat
 curl -sL https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/data/validation-00000-of-00001-869c898b519ad725.parquet -o data/raw/tinystories_valid.parquet
 python scripts/prepare_data.py
 
-# 2. Train the CPU-sized model
+# 2. Train the CPU-sized model (the measured run used --steps 500)
 python scripts/train.py --config configs/cortex-0-nano.json
 
 # 3. Evaluate and sample
@@ -68,7 +73,7 @@ python -m cortex.cli serve --port 8000
 
 | Preset | Parameters | Context | Intended hardware |
 | --- | ---: | ---: | --- |
-| `cortex-0-nano` | 3.15M | 512 | CPU, this repository's measured run |
+| `cortex-0-nano` | 3.15M | 512 | CPU, this branch's measured run |
 | `cortex-0-mini` | 6.3M | 512 | CPU (slow) or small GPU |
 | `cortex-0-small` | 26.7M | 1024 | GPU (Colab T4) |
 | `cortex-0-base` | 81.8M | 2048 | GPU |
@@ -109,8 +114,8 @@ Autonomy is implemented as measurable software behaviour:
 ## Tests
 
 ```bash
-python -m pytest tests/ -q          # unit and integration tests
-python -m cortex.evaluation.suite   # mechanism checks, JSON report
+python -m pytest tests/ -q          # 71 tests
+python -m cortex.evaluation.suite   # 10/10 mechanism checks, JSON report
 ```
 
 The suite separates `mechanism` checks from `quality` checks. A mechanism pass is not a quality
@@ -124,6 +129,7 @@ claim.
 * [`docs/SECURITY.md`](docs/SECURITY.md)
 * [`docs/LANGUAGES.md`](docs/LANGUAGES.md)
 * [`MODEL_CARD.md`](MODEL_CARD.md)
+* [`BRANCH_NOTICE.md`](BRANCH_NOTICE.md)
 
 ## Limitations
 
