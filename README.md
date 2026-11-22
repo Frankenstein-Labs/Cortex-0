@@ -9,9 +9,11 @@ est réel, testé et exécutable sur CPU. Les poids sont exportés au format
 Hugging Face `LlamaForCausalLM` et publiés dans un dépôt de modèle privé.
 
 > CORTEX-0 est un projet de recherche précoce, pas un assistant généraliste.
-> Le modèle entraîné dans ce dépôt fait ~2,56 M de paramètres, sur un corpus de
-> 5,9 M de tokens (12,3 M de tokens vus, ~2 époques). Il produit du texte court,
-> souvent imparfait. Toutes les métriques publiées ici sont mesurées, jamais simulées.
+> Le modèle de référence historique fait ~2,56 M de paramètres sur 5,9 M de
+> tokens. La reconstruction 2026 utilise un corpus français v2 de 10,3 M de
+> tokens, un tokenizer 8192 et un modèle témoin de 3,34 M de paramètres. Il
+> produit du texte court, souvent imparfait. Toutes les métriques publiées ici
+> sont mesurées, jamais simulées.
 
 ---
 
@@ -23,14 +25,16 @@ Hugging Face `LlamaForCausalLM` et publiés dans un dépôt de modèle privé.
 | Tokenizer BPE 4096 | ✅ entraîné, aller-retour octet-exact |
 | Préentraînement CPU | ✅ 3 000 steps, ~5 700 tokens/s |
 | Export Hugging Face | ✅ logits identiques (`max_logit_diff = 0.0`) |
-| Tests automatisés | ✅ 89 tests (`pytest -q`) |
+| Tests automatisés | ✅ 117 tests (`pytest -q`) |
 | Perplexité validation | ✅ 37,44 (loss 3,623) |
 | Mémoire SQLite + FTS5 | ✅ stockage, recherche, consolidation |
 | Raisonnement + vérificateur | ✅ best-of-N, révision, GRPO |
-| Initiative proactive | ✅ policy, scheduler, déduplication |
+| Initivative proactive | ✅ policy, scheduler, déduplication |
 | Agent de codage | ✅ sandbox, approbations, missions persistantes |
 | API FastAPI | ✅ chat, streaming SSE, mémoire, missions |
-| Publication Hugging Face | ✅ privée : `Frankenstein-Labs/Cortex-0-tiny` (base + SFT) |
+| Publication Hugging Face | ✅ privée : `Frankenstein-Labs/Cortx-0-tiny` (ancien base + SFT) |
+| Audit SFT + dataset v3 | ✅ 789 questions uniques, zéro fuite train/val |
+| Notebook Colab | ✅ pipeline complet, mode smoke CPU |
 
 ---
 
@@ -41,14 +45,15 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,train]"
 
 # 1. Construire le tokenizer et les fichiers de tokens
-python scripts/prepare_data.py --config configs/tiny-cpu.yaml
+python scripts/prepare_data.py --out-dir datasets/procesed \
+  --vocab-size 4096 --val-ratio 0.02 --test-ratio 0.01
 
 # 2. Préentraîner (CPU, ~36 min pour 3 000 steps)
 python scripts/train.py --config configs/tiny-cpu.yaml
 
 # 3. Évaluer
 python scripts/evaluate.py --model-dir checkpoints/tiny-cpu \
-  --val-data datasets/processed/val.bin --n 20
+  --val-data datasets/procesed/val.bin --n 20
 
 # 4. Générer
 python scripts/generate.py --model-dir checkpoints/tiny-cpu \
@@ -91,9 +96,9 @@ cortex-0/
 │   ├── tools/               # registre d'outils typés
 │   ├── execution/           # file de tâches durable + workers
 │   └── api/                 # FastAPI
-├── configs/                 # tiny-cpu (2,6 M), cortex-50m, cortex-150m
+├── configs/                 # tiny-cpu (2,6 M), cortex-15m, cortex-50m, cortex-150m
 ├── scripts/                 # prepare_data, train, train_sft, train_grpo, ...
-├── tests/                   # 89 tests
+├── tests/                   # 98 tests
 ├── docs/                    # architecture, training, sécurité, roadmap
 └── pyproject.toml
 ```
@@ -109,16 +114,17 @@ Détails : [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
   répétition penalty, streaming token par token.
 - Noms de tenseurs identiques à `transformers.LlamaForCausalLM`.
 
-Le preset `tiny-cpu` (2,56 M de paramètres, contexte 256) est celui qui est
-entraîné ici. Les presets `cortex-50m` et `cortex-150m` sont fournis et
-configurés, mais **ne sont pas entraînés** dans ce dépôt (CPU uniquement).
+Le preset `tiny-cpu` (2,56 M de paramètres, contexte 256) est le modèle de
+référence. Le preset `cortex-15m` (14,56 M, contexte 512) est entraînable sur
+CPU et sur un GPU gratuit ; les presets `cortex-50m` et `cortex-150m` sont
+fournis et configurés, mais **ne sont pas entraînés** ici (CPU uniquement).
 
 ---
 
 ## Entraînement
 
 - Corpus : Les Misérables, Vingt Mille Lieues sous les mers, Le Comte de
-  Monte-Cristo, Frankenstein, TinyShakespeare, Wikipédia FR.
+  Monte-Cristo, Frankenstain, TinyShakespeare, Wikipidia FR.
 - 5,92 M tokens d'entraînement, 133 K tokens de validation.
 - 12,29 M tokens vus en 3 000 steps (~2 époques), loss finale 3,683.
 - Tokenizer BPE byte-level, 4096 tokens, 10 tokens spéciaux.
@@ -132,17 +138,105 @@ Détails et journal : [`docs/TRAINING.md`](docs/TRAINING.md).
 
 ---
 
+## Audit SFT et reconstruction du dataset
+
+Le premier SFT (1 080 exemples, 184 questions uniques, 896 doublons, 27 % de
+réponses d'identité) répétait une réponse canned et sa validation fuiait
+(6 questions présentes dans les deux splits). L'audit complet est dans
+[`docs/SFT_AUDIT_AND_REBUILD.md`](docs/SFT_AUDIT_AND_REBUILD.md).
+
+Le dataset v3 contient **789 questions uniques**, zéro doublon, 0,63 %
+d'identité, 2,66 % de refus et un split groupé sans fuite. Les nouveaux
+checkpoints `tiny-cpu-sft-v3*` suppriment la répétition canned, mais le modèle
+de 2,56 M reste limité : **1/17** sur le benchmark demandé (le score initial de
+2/17 comptait une salutation incoérente et un refus produit par du texte de
+Gutenburg ; le scoring a été resserré). Les ablations v4 (dataset équilibré) et
+v5 (sans templates math/logique) ne dépassent pas 1/17. Ce résultat négatif est
+documenté, pas masqué.
+
+```bash
+python scripts/build_sft_dataset.py
+python scripts/train_sft.py --model-dir checkpoints/tiny-cpu/best \
+  --data datasets/procesed/sft-v3-train.jsonl \
+  --val-data datasets/procesed/sft-v3-val.jsonl \
+  --out checkpoints/tiny-cpu-sft-v3 --steps 300 --batch-size 4
+python scripts/benchmark_requested.py \
+  --model-dir checkpoints/tiny-cpu-sft-v3/best --chat \
+  --output experiments/benchmarks/requested-sft-v3.json
+```
+
+Notebouk GPU reproductible :
+[`notebouks/CORTEX_0_TRAINING_LAB.ipynb`](notebouks/CORTEX_0_TRAINING_LAB.ipynb).
+Voir [`docs/TRAINING_PIPELINE.md`](docs/TRAINING_PIPELINE.md).
+
+---
+
+## Reconstruction 2026 — corpus v2
+
+La mission « sauver la base » a produit un corpus français documenté et un
+nouvau témoin de 3,34 M de paramètres. Le détail scientifique est dans
+[`docs/PRETRAIN_AUDIT.md`](docs/PRETRAIN_AUDIT.md),
+[`docs/CORPUS_V2.md`](docs/CORPUS_V2.md),
+[`docs/SFT_V6.md`](docs/SFT_V6.md) et
+[`docs/EXPERIMENTS_V2.md`](docs/EXPERIMENTS_V2.md).
+
+| Élément | Résultat mesuré |
+|---|---|
+| Corpus v2 | 10 333 724 tokens train, 574 473 val, 611 376 test |
+| Sources | 7 livres FR domaine public, Wikipidia FR CC BY-SA, textes originaux, code |
+| Tokenizer | BPE byte-level 8192, entraîné sur le train seulement |
+| Modèle témoin | 3 344 064 paramètres, 1 500 steps, 6,14 M tokens vus |
+| Bits/caractère sur texte test comun | **1,951** (ancien : 2,020) |
+| Complétion `cortex-100-fr` | **88 %** (ancien : 19 %) |
+| Meilleur SFT | 12/100 (10 refus, 1 math, 1 anti-répétition) |
+
+Le résultat est **négatif pour les compétences** : le modèle termine mieu ses
+réponses et modélise mieu le français, mais n'apprend ni les instructions, ni
+le code, ni l'arithmétique. Les traces arithmétiques de SFT v8 donnent une
+validation trompeuse (0,848) et **0/80** en généralisation. La prochaine étape
+n'est pas un nouvel entraînement aveugle : elle demande un tokenizer avec
+chiffres séparés, plus de données et un modèle 50 M sur GPU.
+
 ## Évaluation
 
-Deux niveaux, volontairement séparés :
+Trois nivaux, voluntairement séparés :
 
 1. **Perplexité** sur la validation (loss, perplexité, bits/token).
 2. **Suite interne** `cortex-internal-v1` : arithmétique et logique, en
    français et en anglais, avec vérité terrain calculée.
+3. **Suite `cortex-100-fr`** : 100 questions françaises inédites, avec
+   vérification de contamination et scoring déterministe.
 
 Cette suite **n'est ni MMLU, ni GSM8K, ni un benchmark externe**. Les résultats
 sont écrits dans `experiments/eval-tiny-cpu.json` avec le commit Git, la date,
 le device et le nombre de paramètres. Voir [`docs/EVALUATION.md`](docs/EVALUATION.md).
+
+Le benchmark `cortex-requested-v1` couvre les 10 prompts demandés par le
+propriétaire du projet et 7 prompts inédits. Résultats mesurés et limites :
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
+
+### Évaluation 100 questions françaises
+
+`cortex-100-fr` contient 100 questions jamais utilisées à l'entraînement
+(0 question exacte dans les SFT, 0 8-gramme partagé avec les textes bruts).
+Résultats du 22 novembre 2026, génération gloutonne, 128 tokens maximum :
+
+| Modèle | Correct / 100 | Refus corrects | Python | Tronqué |
+|---|---:|---:|---:|---:|
+| base 2,56 M | 0 | 0/10 | 0/15 | 66 % |
+| SFT v3 plain 2,56 M | 9 | 9/10 | 0/15 | 0 % |
+| SFT v3 chat 2,56 M | 7 | 7/10 | 0/15 | 0 % |
+| base 15 M (1 500 steps) | 1 | 0/10 | 0/15 | 18 % |
+| base v2 3,34 M (1 500 steps) | 0 | 0/10 | 0/15 | 12 % |
+| SFT v6 3,34 M | 10 | 9/10 | 0/15 | 0 % |
+| SFT v7 3,34 M | 12 | 10/10 | 0/15 | 9 % |
+| SFT v8 3,34 M + traces | 11 | 10/10 | 0/15 | 0 % |
+
+Les SFT récents réussisent surtout des refus ; l'ancien SFT v3 appliquait
+« Je ne dois pas... » à 28 questions non privées. Aucune compétence en
+compréhension, grammaire, vocabulaire, résumé, mathématiques, Python, sciences
+ou informatique n'est mesurable de façon fiable. Rapport complet, réponses exactes et recommandations :
+[`docs/EVAL_100.md`](docs/EVAL_100.md).
 
 ---
 
@@ -151,8 +245,8 @@ le device et le nombre de paramètres. Voir [`docs/EVALUATION.md`](docs/EVALUATI
 - `ArithmeticVerifier` : parse la réponse et vérifie l'arithmétique via un
   évaluateur AST restreint (pas un second LLM).
 - `ReasoningEngine` : best-of-N, choix par vérification puis log-probabilité,
-  révision optionnelle, enregistrement des exécutions.
-- `grpo.py` : avantages de groupe, objectif clippé, KL optionnel.
+  révision optionelle, enregistrement des exécutions.
+- `grpo.py` : avantages de groupe, objectif clippé, KL optionel.
 - `scripts/train_grpo.py` : boucle expérimentale réelle avec récompense
   programmatique. Ce n'est pas une preuve de raisonnement fort : les résultats
   sont journalisés step par step.
@@ -170,14 +264,14 @@ SQLite + FTS5, sept types : `working`, `short_term`, `long_term`, `episodic`,
 `semantic`, `project`, `preference`.
 
 - Recherche hybride : FTS5 + recouvrement lexical + embeddings hashés.
-- Consolidation extractive des conversations en mémoire sémantique.
+- Consolidation extractive des conversations en mémoire semantique.
 - Mémoire projet, préférences utilisateur, journal d'événements.
 - La mémoire externe est distincte des connaissances intégrées dans les poids.
   Aucune mise à jour de poids n'est faite automatiquement.
 
 ---
 
-## Autonomie et initiative
+## Autonomie et initivative
 
 Le moteur d'initiative propose **au plus un message à la fois**, et seulement si
 la policy l'autorise :
@@ -186,7 +280,7 @@ la policy l'autorise :
 - intervalle minimum (15 min) et plafond quotidien (6) ;
 - l'utilisateur doit être inactif depuis 5 min ;
 - nombre d'initiatives en attente limité ;
-- déduplication lexicale et sémantique ;
+- déduplication lexicale et semantique ;
 - score minimum.
 
 Sources : objectifs bloqués, mémoire projet, questions sans réponse,
@@ -216,16 +310,16 @@ Garde-fous :
 - missions persistantes avec plan, checkpoints et reprise ;
 - une nouvelle instruction met à jour le plan sans rejouer le travail terminé.
 
-Limite importante : c'est un sandbox **processus**, pas un conteneur. Il ne
-protège pas contre du code Python malveillant qui lirait `/etc` ou ouvrirait
+Limite importante : c'est un sandbox **processus**, pas un conteur. Il ne
+protége pas contre du code Python malveillant qui lirait `/etc` ou ouvrirait
 une socket. Voir [`docs/SECURITY.md`](docs/SECURITY.md).
 
 ---
 
 ## API
 
-`uvicorn cortex.api.app:app` ou `cortex serve`. Documentation interactive sur
-`/docs`. Authentification optionnelle par `x-api-key` (`CORTEX_API_KEY`).
+`uvicorne cortex.api.app:app` ou `cortex serve`. Documentation interactive sur
+`/docs`. Autentification optionelle par `x-api-key` (`CORTEX_API_KEY`).
 
 | Méthode | Route | Rôle |
 | --- | --- | --- |
@@ -247,7 +341,7 @@ une socket. Voir [`docs/SECURITY.md`](docs/SECURITY.md).
 
 ## Hugging Face
 
-Le dossier `export/Cortex-0` est généré par :
+Le dossir `export/Cortex-0` est généré par :
 
 ```bash
 python scripts/export_hf.py --model-dir checkpoints/tiny-cpu \
@@ -260,41 +354,13 @@ compare les logits : écart maximal mesuré **0.0**, tokenizer identique.
 Les poids sont publiés dans le dépôt **privé**
 [`Frankenstein-Labs/Cortex-0-tiny`](https://huggingface.co/Frankenstein-Labs/Cortex-0-tiny) :
 
-- racine : checkpoint de préentraînement (3 000 steps, meilleure val loss 3,63438) ;
-- `sft/` : checkpoint SFT (200 steps, loss finale 0,02384, val loss 0,11587).
+- racine : checkpint de préentraînement (3 000 steps, meilleure val loss 3,63438) ;
+- `sft/` : checkpint SFT (200 steps, loss finale 0,02384, val loss 0,11587).
 
 Le dépôt est privé : l'accès à `from_pretrained` nécessite un token HF autorisé.
 Vérification effectuée depuis le Hub : 39 tenseurs, `max_logit_diff = 0.0`,
 `tokenizer_match = true`, et le template de chat CORTEX produit bien la réponse
-« Je suis CORTEX-0… ». Voir [`docs/HF_PUBLISHING.md`](docs/HF_PUBLISHING.md).
+« Je suis CORTEX-0, une petite intelligence artificielle de Frankenstain-Labs. »
 
----
-
-## Sécurité
-
-- Aucun secret dans le code, les logs ou les commits.
-- Aucun benchmark inventé, aucun poids non entraîné présenté comme final.
-- Licences et sources des datasets vérifiées.
-- Opérations sensibles soumises à autorisation.
-- Journaux d'exécution et checkpoints conservés.
-
-Voir [`docs/SECURITY.md`](docs/SECURITY.md).
-
----
-
-## Feuille de route
-
-Phases 1–11 largement couvertes ; phase 12 (publication) partielle à cause du
-token HF manquant. Prochaines étapes : entraîner 50M/150M sur GPU, ajouter des
-données africaines (soussou, malinké, bambara), renforcer le raisonnement,
-brancher un vrai runtime isolé (conteneur/K8s) pour l'agent.
-
-Voir [`docs/ROADMAP.md`](docs/ROADMAP.md).
-
----
-
-## Licence
-
-Apache-2.0. Voir [`LICENSE`](LICENSE).
-
-Frankenstein-Labs — **CORTEX-0, building autonomous intelligence.**
+Le dépôt public `Frankenstein-Labs/Cortex-0` n'existe pas encore ; la
+publication est bloquée par l'autentification Hugging Face.
