@@ -1,0 +1,53 @@
+# CORTEX-0 French preset.
+#
+# Same architecture and parameter count as configs/tiny-cpu.yaml (2,557,632
+# parameters, 256-token context) so the two checkpoints are structurally
+# comparable. The difference is the data: a French-first corpus built by
+# scripts/build_french_corpus.py, with a 4096-token BPE trained on that corpus.
+#
+# 12000 steps x (16 x 256) tokens = 49.2M tokens, about 4.3 epochs over the
+# 11.3M-token French training split.
+model:
+  vocab_size: 4096
+  hidden_size: 192
+  intermediate_size: 512
+  num_hidden_layers: 4
+  num_attention_heads: 6
+  num_key_value_heads: 6
+  max_position_embeddings: 256
+  rms_norm_eps: 0.00001
+  rope_theta: 10000.0
+  tie_word_embeddings: true
+  attention_dropout: 0.0
+  initializer_range: 0.02
+  hidden_act: silu
+  pad_token_id: 0
+  bos_token_id: 1
+  eos_token_id: 2
+
+training:
+  batch_size: 16
+  grad_accum_steps: 1
+  max_steps: 12000
+  learning_rate: 0.0006
+  min_lr_ratio: 0.1
+  warmup_steps: 300
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip: 1.0
+  eval_interval: 500
+  eval_steps: 20
+  log_interval: 100
+  save_interval: 1000
+  seed: 1337
+  device: auto
+  dtype: auto
+  out_dir: checkpoints/french-tiny
+  tensorboard: false
+  compile: false
+  resume: true
+
+train_data: datasets/french/train.bin
+val_data: datasets/french/val.bin
+tokenizer_dir: datasets/french/tokenizer

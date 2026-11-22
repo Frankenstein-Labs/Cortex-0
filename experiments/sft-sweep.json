@@ -1,0 +1,42 @@
+{
+  "note": "Selection uses identity accuracy and retained French perplexity, never training loss alone.",
+  "baseline_pretrain_perplexity": 23.972,
+  "rows": [
+    {
+      "variant": "pretrain",
+      "val_perplexity": 23.972,
+      "identity_accuracy": 0.0,
+      "completion_accuracy": 0.0,
+      "repetitive_outputs": 0
+    },
+    {
+      "variant": "sft-400-lr2e-4",
+      "val_perplexity": 79.425,
+      "identity_accuracy": 0.125,
+      "completion_accuracy": 0.0,
+      "repetitive_outputs": 0
+    },
+    {
+      "variant": "sft-150-lr1e-4",
+      "val_perplexity": 40.663,
+      "identity_accuracy": 0.125,
+      "completion_accuracy": 0.0,
+      "repetitive_outputs": 0
+    },
+    {
+      "variant": "sft-300-lr5e-5",
+      "val_perplexity": 38.636,
+      "identity_accuracy": 0.0,
+      "completion_accuracy": 0.0,
+      "repetitive_outputs": 0
+    },
+    {
+      "variant": "sft-100-lr2e-4",
+      "val_perplexity": 51.266,
+      "identity_accuracy": 0.0,
+      "completion_accuracy": 0.0,
+      "repetitive_outputs": 0
+    }
+  ],
+  "selected": "sft-150-lr1e-4"
+}

@@ -1,0 +1,14 @@
+{
+ "pretrain": {
+  "Quel est ton nom ?": "Le nom de nombres premiers degré d'accès (souvent : c'est le nom d'un objet « arbre »),",
+  "Qui t'a créé ?": ", est un langage de programmation.\n\nEn français, les langages de programmations d'IET étaient d'abord",
+  "Le chat mange une": "sorte de voie (dans la cuisine française, mais aussi les tours de mai à octobre) qui se déroulent.",
+  "Bonjour, je m'appelle": "le cessez-le-feu est l'un des premiers auteurs de la famille des hautes bourgeoises."
+ },
+ "sft": {
+  "Quel est ton nom ?": "u. Je n'ai pas de conscience et je ne prends pas d'initiative sans autorisation.",
+  "Qui t'a créé ?": ", une petite IA autonome de Frankenstein-Labs. Je suis un modèle de langage entraîné localement,",
+  "Le chat mange une": "sorte de , est limitée à mes données d'entraînement et je peux me tromper.",
+  "Bonjour, je m'appelle": "CORTEX-0. Je n'ai pas de conscience et je ne prends pas d'initiative sans"
+ }
+}
